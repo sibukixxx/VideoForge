@@ -15,7 +15,9 @@ use tokio::io::AsyncReadExt;
 use videoforge_core::preview::{PreviewRenderer, PreviewRequest};
 use videoforge_core::AppError;
 
-pub use command::{build_args, RenderPlan};
+pub use command::{
+    build_args, escape_option_value, quote_filter_value, quote_graph_token, RenderPlan,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfmpegInfo {
