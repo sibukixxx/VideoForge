@@ -203,7 +203,7 @@ async fn run_pipeline(
     // --- Background asset ------------------------------------------------
     let background = match &config.preview.background {
         Some(bg) => {
-            let src = workspace.resolve(bg);
+            let src = workspace.resolve(bg)?;
             if src.is_file() {
                 let name = src
                     .file_name()
@@ -276,7 +276,7 @@ async fn run_pipeline(
                         .preview
                         .font
                         .as_deref()
-                        .map(|f| workspace.resolve(f))
+                        .and_then(|f| workspace.resolve_allow_absolute(f).ok())
                         .filter(|p| p.is_file());
                     renderer
                         .render(PreviewRequest {

@@ -13,7 +13,7 @@ use videoforge_core::platform::platform_label;
 use videoforge_core::project::VideoProject;
 use videoforge_core::{AppError, Workspace, GENERATOR_VERSION};
 
-use crate::{Ymm4Exporter, BUNDLE_TEMPLATE_FILE};
+use crate::BUNDLE_TEMPLATE_FILE;
 
 pub const BUNDLE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const BUNDLE_KIND: &str = "videoforge-ymm4-handoff";
@@ -26,6 +26,10 @@ pub struct BundleOptions {
     pub template: Option<PathBuf>,
     /// Also produce `<out_dir>.zip`.
     pub zip: bool,
+    /// Overwrite an existing `out_dir`. Only ever removes a directory that
+    /// both passes [`ensure_safe_to_overwrite`] (not a protected directory)
+    /// and already looks like a VideoForge-generated bundle.
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -74,6 +78,15 @@ pub fn create_bundle(
     let mut warnings = Vec::new();
 
     if out_dir.exists() {
+        if !options.force {
+            return Err(AppError::UnsafeOverwrite {
+                path: out_dir.clone(),
+                reason:
+                    "directory already exists; pass --force to overwrite a VideoForge-generated bundle"
+                        .into(),
+            });
+        }
+        ensure_safe_to_overwrite(&out_dir, workspace)?;
         std::fs::remove_dir_all(&out_dir).map_err(|e| AppError::write(&out_dir, e))?;
     }
     std::fs::create_dir_all(&out_dir).map_err(|e| AppError::write(&out_dir, e))?;
@@ -99,7 +112,7 @@ pub fn create_bundle(
         .or_else(|| {
             workspace.and_then(|ws| {
                 let cfg = ws.load_config().ok()?;
-                let p = ws.resolve(&cfg.export.ymm4.template);
+                let p = ws.resolve(&cfg.export.ymm4.template).ok()?;
                 p.is_file().then_some(p)
             })
         });
@@ -175,6 +188,58 @@ pub fn is_bundle_dir(dir: &Path) -> bool {
         .is_some_and(|m| m.kind == BUNDLE_KIND)
 }
 
+/// Guards `--force` bundle overwrites (VF-070..072 hardening).
+///
+/// Refuses to remove: a filesystem root, the user's home directory, the
+/// current workspace root or its `generated/` directory, and anything that
+/// does not already look like a VideoForge-generated bundle (per
+/// [`is_bundle_dir`]) — so `--force` can only ever clobber a previous bundle
+/// this tool created, never an arbitrary directory a mistyped `--out` points
+/// at.
+fn ensure_safe_to_overwrite(out_dir: &Path, workspace: Option<&Workspace>) -> Result<(), AppError> {
+    let refuse = |reason: String| {
+        Err(AppError::UnsafeOverwrite {
+            path: out_dir.to_path_buf(),
+            reason,
+        })
+    };
+    let canonical = match out_dir.canonicalize() {
+        Ok(p) => p,
+        Err(e) => return refuse(format!("cannot inspect existing directory: {e}")),
+    };
+
+    if canonical.parent().is_none() {
+        return refuse("refusing to remove a filesystem root".into());
+    }
+
+    let mut protected: Vec<PathBuf> = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        protected.push(home);
+    }
+    if let Some(ws) = workspace {
+        protected.push(ws.root().to_path_buf());
+        protected.push(ws.generated_dir());
+    }
+    for p in &protected {
+        let Ok(p) = p.canonicalize() else { continue };
+        if canonical == p || p.starts_with(&canonical) {
+            return refuse(format!(
+                "refusing to remove a protected directory ({})",
+                p.display()
+            ));
+        }
+    }
+
+    if !is_bundle_dir(out_dir) {
+        return refuse(
+            "does not look like a VideoForge-generated bundle (no matching manifest.json); \
+             refusing to overwrite"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 fn copy(src: &Path, dst: &Path) -> Result<(), AppError> {
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent).map_err(|e| AppError::write(parent, e))?;
@@ -234,10 +299,6 @@ fn zip_dir(dir: &Path, zip_path: &Path) -> Result<(), AppError> {
     zip.finish().map_err(zip_err)?;
     Ok(())
 }
-
-// Keep the exporter type referenced so `resolve_template` stays discoverable.
-#[allow(dead_code)]
-fn _exporter_link(_: &Ymm4Exporter) {}
 
 #[cfg(test)]
 mod tests {
@@ -322,5 +383,121 @@ mod tests {
         assert_eq!(manifest.kind, BUNDLE_KIND);
         assert_eq!(manifest.assets, vec!["assets/audio/001.wav"]);
         assert_eq!(manifest.template.as_deref(), Some("template.ymmp"));
+    }
+
+    fn minimal_project(project_dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(project_dir).unwrap();
+        let p = VideoProject::new("sample", "S", VideoSettings::default());
+        let project_path = project_dir.join("project.vfp.json");
+        p.save(&project_path).unwrap();
+        project_path
+    }
+
+    #[test]
+    fn refuses_to_overwrite_existing_dir_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = minimal_project(&dir.path().join("generated").join("sample"));
+        let out_dir = dir.path().join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(out_dir.join("keepme.txt"), b"important").unwrap();
+
+        let err = create_bundle(
+            &project_path,
+            None,
+            BundleOptions {
+                out_dir: Some(out_dir.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, AppError::UnsafeOverwrite { .. }));
+        assert!(out_dir.join("keepme.txt").is_file());
+    }
+
+    #[test]
+    fn force_refuses_directory_that_is_not_a_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = minimal_project(&dir.path().join("generated").join("sample"));
+        let out_dir = dir.path().join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(out_dir.join("keepme.txt"), b"important").unwrap();
+
+        let err = create_bundle(
+            &project_path,
+            None,
+            BundleOptions {
+                out_dir: Some(out_dir.clone()),
+                force: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, AppError::UnsafeOverwrite { .. }));
+        assert!(out_dir.join("keepme.txt").is_file());
+    }
+
+    #[test]
+    fn force_overwrites_previous_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = minimal_project(&dir.path().join("generated").join("sample"));
+        let out_dir = dir.path().join("out");
+
+        create_bundle(
+            &project_path,
+            None,
+            BundleOptions {
+                out_dir: Some(out_dir.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(is_bundle_dir(&out_dir));
+
+        // Re-running without --force still refuses.
+        assert!(matches!(
+            create_bundle(
+                &project_path,
+                None,
+                BundleOptions {
+                    out_dir: Some(out_dir.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err(),
+            AppError::UnsafeOverwrite { .. }
+        ));
+
+        // --force overwrites a directory that is itself a prior bundle.
+        let result = create_bundle(
+            &project_path,
+            None,
+            BundleOptions {
+                out_dir: Some(out_dir.clone()),
+                force: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.dir, out_dir);
+    }
+
+    #[test]
+    fn force_refuses_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("videoforge.yaml"), "speakers:\n  a: {}\n").unwrap();
+        let project_path = minimal_project(&dir.path().join("generated").join("sample"));
+        let ws = Workspace::open(dir.path()).unwrap();
+
+        let err = create_bundle(
+            &project_path,
+            Some(&ws),
+            BundleOptions {
+                out_dir: Some(dir.path().to_path_buf()),
+                force: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, AppError::UnsafeOverwrite { .. }));
     }
 }

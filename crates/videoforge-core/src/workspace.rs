@@ -89,20 +89,94 @@ impl Workspace {
         Config::load(&self.config_path())
     }
 
-    /// Resolve a workspace-relative (forward-slash) path to a native path.
-    /// Absolute inputs are returned unchanged.
-    pub fn resolve(&self, rel: &str) -> PathBuf {
+    /// Resolve a workspace-relative (forward-slash or native) path to a
+    /// native path guaranteed to stay inside the workspace root.
+    ///
+    /// Rejects absolute inputs, `..` segments, and drive-letter-like segments
+    /// (a Windows path-traversal gotcha: `C:foo` is drive-relative, not
+    /// absolute). Also rejects paths that would escape the workspace root via
+    /// a symlink in an already-existing ancestor. Use
+    /// [`Workspace::resolve_allow_absolute`] for settings that explicitly
+    /// document absolute-path support.
+    pub fn resolve(&self, rel: &str) -> Result<PathBuf, AppError> {
+        let candidate = self.join_relative(rel)?;
+        self.ensure_within_root(&candidate, rel)?;
+        Ok(candidate)
+    }
+
+    /// Like [`Workspace::resolve`], but an absolute `rel` is returned
+    /// unchanged instead of being rejected. Only use this for settings that
+    /// explicitly document absolute-path support (e.g. `preview.font`);
+    /// prefer [`Workspace::resolve`] everywhere else.
+    pub fn resolve_allow_absolute(&self, rel: &str) -> Result<PathBuf, AppError> {
         let p = Path::new(rel);
         if p.is_absolute() {
-            return p.to_path_buf();
+            return Ok(p.to_path_buf());
+        }
+        self.resolve(rel)
+    }
+
+    fn join_relative(&self, rel: &str) -> Result<PathBuf, AppError> {
+        let invalid = |reason: &str| AppError::InvalidWorkspacePath {
+            path: rel.to_string(),
+            reason: reason.to_string(),
+        };
+        let p = Path::new(rel);
+        if p.is_absolute() {
+            return Err(invalid("absolute paths are not allowed here"));
         }
         let mut out = self.root.clone();
         for part in rel.split(['/', '\\']) {
-            if !part.is_empty() && part != "." {
-                out.push(part);
+            if part.is_empty() || part == "." {
+                continue;
+            }
+            if part == ".." {
+                return Err(invalid("`..` is not allowed in workspace-relative paths"));
+            }
+            if part.contains(':') {
+                return Err(invalid(
+                    "`:` is not allowed in workspace-relative path segments",
+                ));
+            }
+            out.push(part);
+        }
+        Ok(out)
+    }
+
+    /// Canonicalizes the longest existing ancestor of `candidate` (which may
+    /// not exist yet, e.g. a not-yet-generated output path) and checks it is
+    /// still inside the workspace root, catching escapes via symlinks.
+    fn ensure_within_root(&self, candidate: &Path, original: &str) -> Result<(), AppError> {
+        let mut check = candidate.to_path_buf();
+        let mut trailing: Vec<std::ffi::OsString> = Vec::new();
+        loop {
+            match check.canonicalize() {
+                Ok(canon) => {
+                    let mut full = canon;
+                    for part in trailing.iter().rev() {
+                        full.push(part);
+                    }
+                    return if full.starts_with(&self.root) {
+                        Ok(())
+                    } else {
+                        Err(AppError::InvalidWorkspacePath {
+                            path: original.to_string(),
+                            reason: "path escapes the workspace root".into(),
+                        })
+                    };
+                }
+                Err(_) => match check.file_name().map(|s| s.to_os_string()) {
+                    Some(name) => {
+                        trailing.push(name);
+                        check = check
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .unwrap_or_else(|| self.root.clone());
+                    }
+                    None => return Ok(()),
+                },
             }
         }
-        out
     }
 
     /// Workspace-relative display path with forward slashes. Falls back to the
@@ -149,7 +223,7 @@ mod tests {
         assert_eq!(ws.root(), dir.path().canonicalize().unwrap());
         assert_eq!(ws.relative(&script), "scripts/deep/x.md");
         assert_eq!(
-            ws.resolve("scripts/deep/x.md"),
+            ws.resolve("scripts/deep/x.md").unwrap(),
             ws.root().join("scripts/deep/x.md")
         );
         assert!(ws.load_config().is_ok());
@@ -160,5 +234,80 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = Workspace::open(dir.path()).unwrap_err();
         assert!(matches!(err, AppError::WorkspaceNotFound(_)));
+    }
+
+    fn open_ws() -> (tempfile::TempDir, Workspace) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(CONFIG_FILE), "speakers:\n  a: {}\n").unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        (dir, ws)
+    }
+
+    #[test]
+    fn rejects_parent_traversal() {
+        let (_dir, ws) = open_ws();
+        assert!(matches!(
+            ws.resolve("../foo").unwrap_err(),
+            AppError::InvalidWorkspacePath { .. }
+        ));
+        assert!(matches!(
+            ws.resolve("../../foo").unwrap_err(),
+            AppError::InvalidWorkspacePath { .. }
+        ));
+        assert!(matches!(
+            ws.resolve("assets/../../foo").unwrap_err(),
+            AppError::InvalidWorkspacePath { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_absolute_paths() {
+        let (_dir, ws) = open_ws();
+        assert!(matches!(
+            ws.resolve("/etc/passwd").unwrap_err(),
+            AppError::InvalidWorkspacePath { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_drive_letter_like_segments() {
+        let (_dir, ws) = open_ws();
+        assert!(matches!(
+            ws.resolve("C:evil.txt").unwrap_err(),
+            AppError::InvalidWorkspacePath { .. }
+        ));
+    }
+
+    #[test]
+    fn resolves_normal_relative_paths() {
+        let (_dir, ws) = open_ws();
+        assert_eq!(
+            ws.resolve("assets/audio/001.wav").unwrap(),
+            ws.root().join("assets").join("audio").join("001.wav")
+        );
+    }
+
+    #[test]
+    fn resolve_allow_absolute_permits_absolute_only_there() {
+        let (_dir, ws) = open_ws();
+        assert_eq!(
+            ws.resolve_allow_absolute("/usr/share/fonts/x.ttf").unwrap(),
+            PathBuf::from("/usr/share/fonts/x.ttf")
+        );
+        assert_eq!(
+            ws.resolve_allow_absolute("assets/fonts/x.ttf").unwrap(),
+            ws.root().join("assets").join("fonts").join("x.ttf")
+        );
+        assert!(ws.resolve_allow_absolute("../escape.ttf").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_escape() {
+        let (dir, ws) = open_ws();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+        let err = ws.resolve("escape/x.txt").unwrap_err();
+        assert!(matches!(err, AppError::InvalidWorkspacePath { .. }));
     }
 }

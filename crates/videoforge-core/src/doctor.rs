@@ -167,24 +167,37 @@ pub async fn run(input: DoctorInput<'_>) -> DoctorReport {
 
         // Template
         if let Some(cfg) = &config {
-            let template = ws.resolve(&cfg.export.ymm4.template);
-            if template.is_file() {
-                push(
-                    &mut checks,
-                    "Template",
-                    CheckStatus::Ok,
-                    cfg.export.ymm4.template.clone(),
-                );
-            } else {
-                push(
-                    &mut checks,
-                    "Template",
-                    CheckStatus::Warn,
-                    format!(
-                        "{} not found (needed only for `export ymm4`)",
-                        cfg.export.ymm4.template
-                    ),
-                );
+            match ws.resolve(&cfg.export.ymm4.template) {
+                Ok(template) if template.is_file() => {
+                    push(
+                        &mut checks,
+                        "Template",
+                        CheckStatus::Ok,
+                        cfg.export.ymm4.template.clone(),
+                    );
+                }
+                Ok(_) => {
+                    push(
+                        &mut checks,
+                        "Template",
+                        CheckStatus::Warn,
+                        format!(
+                            "{} not found (needed only for `export ymm4`)",
+                            cfg.export.ymm4.template
+                        ),
+                    );
+                }
+                Err(e) => {
+                    push(
+                        &mut checks,
+                        "Template",
+                        CheckStatus::Fail,
+                        format!(
+                            "invalid export.ymm4.template `{}`: {e}",
+                            cfg.export.ymm4.template
+                        ),
+                    );
+                }
             }
         }
     }

@@ -115,6 +115,10 @@ enum BundleTarget {
         /// Skip creating the .zip next to the directory
         #[arg(long)]
         no_zip: bool,
+        /// Overwrite an existing --out directory, but only if it already
+        /// looks like a VideoForge-generated bundle
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -179,8 +183,9 @@ async fn main() -> ExitCode {
                     out,
                     template,
                     no_zip,
+                    force,
                 },
-        } => commands::bundle_ymm4(&ctx, project, out, template, !no_zip),
+        } => commands::bundle_ymm4(&ctx, project, out, template, !no_zip, force),
     };
     match result {
         Ok(code) => code,
