@@ -130,6 +130,34 @@ generated/
 cache/
 "#;
 
+const TREND_SCRIPT_SKILL: &str = r#"---
+name: trend-script
+description: トレンドや時事ネタから VOICEVOX 用の話者付き Markdown 台本を自動生成する。「トレンドで台本」「台本自動生成」「はやりの動画の台本作って」などで発動。
+---
+
+VideoForge 本体はトレンド取得や文章生成を行わない（`AGENTS.md` 参照）。この作業はすべて
+エージェント側（このスキルを実行しているあなた）が担当する。
+
+## 手順
+
+1. **ネタを決める**: 引数でトピックが指定されていなければ、Web検索などで今話題になっている
+   ニュース/トレンドを1つ選ぶ。ジャンルは問わない。
+2. **話者を確認する**: `videoforge.yaml` の `speakers` を読み、使えるキー/aliasを把握する。
+   サンプルの霊夢/魔理沙に限らず、そのワークスペースの設定に従う。
+3. **台本を書く**: 選んだネタを話者同士の掛け合い（または単一話者のナレーション）に
+   落とし込み、`scripts/<slug>.md` として保存する。フォーマットは `AGENTS.md` の
+   「台本フォーマット」節に従う。
+4. **検証する**: `videoforge validate scripts/<slug>.md` を実行し、エラーがあれば台本を直す。
+5. **生成する**: `videoforge generate scripts/<slug>.md` を実行し、
+   `generated/<slug>/manifest.json` を確認する。VOICEVOX/FFmpegが無い環境では
+   `--fake-tts --no-preview` でも配管確認できる。
+
+## 注意
+
+- 台本の話者名は固定しない。ワークスペースの `speakers` 設定を必ず読んでから書く。
+- ソースの著作権・引用ルールを守る。原文の丸写しではなく要約・言い換えで台本化する。
+"#;
+
 pub fn init(dir: &Path, name: Option<&str>) -> Result<InitReport, AppError> {
     let root = dir.to_path_buf();
     let config_path = root.join(CONFIG_FILE);
@@ -166,6 +194,7 @@ pub fn init(dir: &Path, name: Option<&str>) -> Result<InitReport, AppError> {
         "assets/se",
         "templates/ymm4",
         "generated",
+        ".claude/skills/trend-script",
     ] {
         mkdir(d)?;
     }
@@ -181,6 +210,7 @@ pub fn init(dir: &Path, name: Option<&str>) -> Result<InitReport, AppError> {
     write(".gitignore", GITIGNORE)?;
     write("scripts/sample.md", SAMPLE_SCRIPT)?;
     write("templates/ymm4/README.md", TEMPLATE_README)?;
+    write(".claude/skills/trend-script/SKILL.md", TREND_SCRIPT_SKILL)?;
     for keep in [
         "assets/character",
         "assets/background",
@@ -234,5 +264,19 @@ mod tests {
         let content = agents_md("demo");
         assert!(content.contains("トレンドから台本を作るとき"));
         assert!(content.contains("videoforge.yaml"));
+    }
+
+    #[test]
+    fn init_scaffolds_trend_script_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("demo");
+        init(&root, None).unwrap();
+
+        let skill_path = root.join(".claude/skills/trend-script/SKILL.md");
+        assert!(skill_path.is_file());
+        let content = std::fs::read_to_string(&skill_path).unwrap();
+        assert!(content.contains("name: trend-script"));
+        assert!(content.contains("videoforge validate"));
+        assert!(content.contains("videoforge generate"));
     }
 }
