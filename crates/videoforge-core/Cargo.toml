@@ -1,0 +1,27 @@
+[package]
+name = "videoforge-core"
+description = "VideoForge core: workspace, config, validation, generation pipeline, engine traits"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+videoforge-project = { workspace = true }
+videoforge-script = { workspace = true }
+videoforge-timeline = { workspace = true }
+videoforge-platform = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

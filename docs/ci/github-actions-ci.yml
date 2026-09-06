@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: cargo (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace
+      - name: build CLI
+        run: cargo build -p videoforge-cli --release
+      - name: smoke (offline pipeline)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="$PWD/target/release/videoforge"
+          cd "$RUNNER_TEMP"
+          "$BIN" init demo --name demo
+          cd demo
+          cp "$GITHUB_WORKSPACE/fixtures/templates/ymm4/default.ymmp" templates/ymm4/default.ymmp
+          "$BIN" validate scripts/sample.md
+          "$BIN" generate scripts/sample.md --fake-tts --no-preview
+          "$BIN" bundle ymm4 generated/sample/project.vfp.json
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            "$BIN" export ymm4 generated/sample/project.vfp.json
+            test -f generated/sample/ymm4/project.ymmp
+          else
+            ! "$BIN" export ymm4 generated/sample/project.vfp.json
+          fi
+
+  # The desktop app (apps/desktop, Tauri + React) is not part of the repo yet;
+  # `pnpm test` / `pnpm build` will be added here once it lands (design §40).

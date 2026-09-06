@@ -1,0 +1,16 @@
+[package]
+name = "videoforge-preview"
+description = "FFmpeg preview renderer implementing videoforge_core::preview::PreviewRenderer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+videoforge-core = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
