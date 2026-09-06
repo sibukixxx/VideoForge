@@ -30,13 +30,13 @@ pub struct Manifest {
 
 impl Manifest {
     pub fn save(&self, path: &Path) -> Result<(), AppError> {
-        let json =
-            serde_json::to_string_pretty(self).map_err(|e| AppError::Other(e.to_string()))?;
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| AppError::serialization("manifest.json", e))?;
         std::fs::write(path, json).map_err(|e| AppError::write(path, e))
     }
 
     pub fn load(path: &Path) -> Result<Self, AppError> {
         let text = std::fs::read_to_string(path).map_err(|e| AppError::read(path, e))?;
-        serde_json::from_str(&text).map_err(|e| AppError::Other(format!("invalid manifest: {e}")))
+        serde_json::from_str(&text).map_err(|e| AppError::serialization("manifest.json", e))
     }
 }

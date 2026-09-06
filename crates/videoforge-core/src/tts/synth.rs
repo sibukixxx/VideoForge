@@ -56,10 +56,9 @@ pub async fn synthesize_all(
         let progress = Arc::clone(&progress);
         let done = Arc::clone(&done);
         set.spawn(async move {
-            let _permit = semaphore
-                .acquire_owned()
-                .await
-                .map_err(|e| AppError::Other(e.to_string()))?;
+            let _permit = semaphore.acquire_owned().await.map_err(|e| {
+                AppError::InternalInvariant(format!("synthesis semaphore closed: {e}"))
+            })?;
             if cancel.is_cancelled() {
                 return Err(AppError::Cancelled);
             }
@@ -86,14 +85,23 @@ pub async fn synthesize_all(
             }
             Err(e) => {
                 set.abort_all();
-                return Err(AppError::Other(format!("synthesis task failed: {e}")));
+                return Err(AppError::InternalInvariant(format!(
+                    "synthesis task failed to join: {e}"
+                )));
             }
         }
     }
-    Ok(results
+    results
         .into_iter()
-        .map(|r| r.expect("all jobs completed"))
-        .collect())
+        .enumerate()
+        .map(|(pos, r)| {
+            r.ok_or_else(|| {
+                AppError::InternalInvariant(format!(
+                    "synthesis job {pos} produced no result (expected {total})"
+                ))
+            })
+        })
+        .collect()
 }
 
 async fn synthesize_one(

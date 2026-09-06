@@ -106,7 +106,8 @@ pub fn write_ymmp(path: &Path, value: &serde_json::Value, with_bom: bool) -> Res
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| AppError::write(parent, e))?;
     }
-    let json = serde_json::to_string_pretty(value).map_err(|e| AppError::Other(e.to_string()))?;
+    let json = serde_json::to_string_pretty(value)
+        .map_err(|e| AppError::serialization("ymm4 project", e))?;
     let mut bytes = Vec::with_capacity(json.len() + 3);
     if with_bom {
         bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);

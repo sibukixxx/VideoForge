@@ -161,8 +161,8 @@ pub fn create_bundle(
         ),
     };
     let manifest_path = out_dir.join("manifest.json");
-    let json =
-        serde_json::to_string_pretty(&manifest).map_err(|e| AppError::Other(e.to_string()))?;
+    let json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| AppError::serialization("bundle manifest", e))?;
     std::fs::write(&manifest_path, json).map_err(|e| AppError::write(&manifest_path, e))?;
 
     let zip = if options.zip {

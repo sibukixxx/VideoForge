@@ -191,7 +191,18 @@ async fn main() -> ExitCode {
         Ok(code) => code,
         Err(e) => {
             if ctx.json {
-                let payload = serde_json::json!({ "ok": false, "error": e.to_string() });
+                // `code` is the stable identifier callers dispatch on; the
+                // AppError may be wrapped in anyhow context, so walk the chain.
+                let code = e
+                    .chain()
+                    .find_map(|c| c.downcast_ref::<videoforge_core::AppError>())
+                    .map(videoforge_core::AppError::code)
+                    .unwrap_or("other");
+                let payload = serde_json::json!({
+                    "ok": false,
+                    "code": code,
+                    "error": e.to_string(),
+                });
                 println!("{payload}");
             } else {
                 eprintln!("Error:\n{e}");
