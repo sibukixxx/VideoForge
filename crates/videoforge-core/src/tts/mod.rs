@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::VoiceParams;
 use crate::error::AppError;
 
-pub use cache::TtsCache;
+pub use cache::{bind_cache, BoundCache, TtsCache, CACHE_SCHEMA_VERSION};
 pub use fake::FakeTtsEngine;
 pub use synth::{synthesize_all, SynthesisJob, SynthesizedDialogue};
 
