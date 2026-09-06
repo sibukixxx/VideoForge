@@ -88,6 +88,9 @@ These span files and are easy to break silently:
 - **`RelativeAssetPath`** (`videoforge-project/src/path.rs`) is the only asset path type in the IR:
   forward slashes, relative to the project dir, no `..`, no drive-letter `:` component. Absolute
   paths appear only at the moment of YMM4 materialization.
+- **Config-supplied paths never escape the workspace.** `Workspace::resolve` returns a `Result` and
+  rejects traversal; use `resolve_allow_absolute` only where an absolute path is legitimately
+  allowed (the preview font). Don't "simplify" either back into an infallible join.
 - **Milliseconds are canonical.** Frames are computed only at export time via `millis_to_frame`,
   so changing fps never rewrites the project.
 - **`Config` is `#[serde(deny_unknown_fields)]`** — a new `videoforge.yaml` key needs a struct
@@ -101,6 +104,11 @@ These span files and are easy to break silently:
 - **`videoforge.yaml` numbers are range-checked at load** (`config::validate`), and voice scales
   are rejected unless finite — a NaN passes every `<`/`>` comparison, so the finite check has to
   come first. The bounds and their justification are commented at the top of `config.rs`.
+- **The TTS endpoint is loopback-only by default** (`config::check_endpoint_allowed`, enforced both
+  at config load and at engine construction so a `--endpoint` override can't bypass it).
+  `tts.allow_remote_endpoint: true` is the opt-in.
+- **Writes that would destroy user data ask first.** `bundle ymm4` refuses an existing output
+  directory unless `--force`, and even then only when it looks like a VideoForge bundle.
 - **TTS cache** is SHA256(engine, speaker_id, text, speed, pitch, intonation, volume) under the OS
   cache dir, never inside the workspace. Any change to the key invalidates every cached WAV.
 - **YMM4 export is a template patch, not a serializer.** The template `.ymmp` is an opaque
@@ -111,7 +119,9 @@ These span files and are easy to break silently:
 ## Known gaps
 
 - `fixtures/templates/ymm4/default.ymmp` is synthetic. The Phase 0 spike — a real YMM4 template
-  exported and reopened on Windows — has not been done; it is the largest technical risk.
+  exported and reopened on Windows — has not been done; it is the largest technical risk. The
+  procedure is written up in `docs/testing/ymm4-manual-e2e.md` with an empty results table;
+  whoever runs it fills that in.
 - FFmpeg preview is covered only at the command-builder level; no real render is tested. The
   filter graph needs an FFmpeg built with `drawtext` (libfreetype), and `doctor` reports FFmpeg as
   `ok` without checking for it — on such a build `generate` dies with `preview_render_failed`
