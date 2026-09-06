@@ -311,42 +311,49 @@ fn parse_speaker_header(line: &str) -> Option<(String, BTreeMap<String, String>)
     if head.is_empty() {
         return None;
     }
+    let (name, attributes) = split_attribute_suffix(head)?;
     // Reject things that look like URLs or prose ("see http", "注意 事項").
-    let (name, attrs) = match head.find('[') {
-        Some(open) => {
-            let close = head.rfind(']')?;
-            if close < open {
-                return None;
-            }
-            (head[..open].trim(), Some(&head[open + 1..close]))
-        }
-        None => (head, None),
-    };
     if name.is_empty() || name.chars().any(char::is_whitespace) || name.len() > 64 {
         return None;
     }
     if name.contains(['/', '\\', '@', '"', '\'', '<', '>']) {
         return None;
     }
+    Some((name.to_string(), attributes))
+}
+
+/// `head[k=v, k2=v2]` → (`head`, attributes). Without brackets the attribute
+/// map is empty. `None` when a `[` has no matching `]`.
+///
+/// Values may be double-quoted; a bare `key` means `key=true`.
+fn split_attribute_suffix(text: &str) -> Option<(&str, BTreeMap<String, String>)> {
+    let (head, attrs) = match text.find('[') {
+        Some(open) => {
+            let close = text.rfind(']')?;
+            if close < open {
+                return None;
+            }
+            (text[..open].trim(), &text[open + 1..close])
+        }
+        None => (text, ""),
+    };
 
     let mut attributes = BTreeMap::new();
-    if let Some(attrs) = attrs {
-        for pair in attrs.split(',') {
-            let pair = pair.trim();
-            if pair.is_empty() {
-                continue;
+    for pair in attrs.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        match pair.split_once('=') {
+            Some((k, v)) => {
+                attributes.insert(k.trim().to_string(), v.trim().trim_matches('"').to_string());
             }
-            match pair.split_once('=') {
-                Some((k, v)) => {
-                    attributes.insert(k.trim().to_string(), v.trim().trim_matches('"').to_string());
-                }
-                None => {
-                    attributes.insert(pair.to_string(), "true".to_string());
-                }
+            None => {
+                attributes.insert(pair.to_string(), "true".to_string());
             }
         }
     }
-    Some((name.to_string(), attributes))
+    Some((head, attributes))
 }
 
 #[cfg(test)]
