@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use videoforge_script::{Script, ScriptError};
+use videoforge_project::{Presentation, KNOWN_INTENTS, KNOWN_ROLES};
+use videoforge_script::{DirectiveKind, Script, ScriptError};
 
 use crate::config::{Config, VoiceParams};
 use crate::error::AppError;
@@ -143,6 +144,40 @@ pub fn validate_script(
         }
     }
 
+    for d in &script.directives {
+        let (directive, attributes) = match &d.kind {
+            DirectiveKind::Image { attributes, .. } => ("@image", attributes),
+            DirectiveKind::Character { attributes, .. } => ("@character", attributes),
+            DirectiveKind::Bgm { .. }
+            | DirectiveKind::Se { .. }
+            | DirectiveKind::Transition { .. } => continue,
+        };
+        if let Some(role) = attributes
+            .get("role")
+            .filter(|r| !Presentation::is_known_role(r))
+        {
+            report.warnings.push(ValidationIssue::new(
+                Some(d.line),
+                format!(
+                    "`role={role}` on `{directive}` is not a recommended role (known: {}); it is kept as written",
+                    KNOWN_ROLES.join(", ")
+                ),
+            ));
+        }
+        if let Some(intent) = attributes
+            .get("intent")
+            .filter(|i| !Presentation::is_known_intent(i))
+        {
+            report.warnings.push(ValidationIssue::new(
+                Some(d.line),
+                format!(
+                    "`intent={intent}` on `{directive}` is not a recommended intent (known: {}); it is kept as written",
+                    KNOWN_INTENTS.join(", ")
+                ),
+            ));
+        }
+    }
+
     if let Some(bg) = &config.preview.background {
         if config.preview.enabled {
             match workspace.resolve(bg) {
@@ -218,6 +253,37 @@ mod tests {
         assert_eq!(report.errors[0].line, Some(4));
         assert!(report.errors[0].message.contains("アリス"));
         assert!(report.into_result().is_err());
+    }
+
+    #[test]
+    fn unknown_presentation_vocabulary_on_directives_is_a_warning_not_an_error() {
+        let (_d, ws, cfg) = workspace();
+        let path = ws.scripts_dir().join("visual.md");
+        std::fs::write(
+            &path,
+            "@image assets/image/a.png[role=hero, intent=wobble]\n@character reimu[role=character, intent=fade]\n@bgm assets/bgm/a.mp3[role=hero]\n霊夢:\nやあ\n",
+        )
+        .unwrap();
+        let report = validate_file(&ws, &cfg, &path);
+        assert!(report.is_ok(), "{:?}", report.errors);
+        let vocabulary: Vec<&ValidationIssue> = report
+            .warnings
+            .iter()
+            .filter(|w| w.message.contains("recommended"))
+            .collect();
+        assert_eq!(
+            vocabulary,
+            vec![
+                &ValidationIssue::new(
+                    Some(1),
+                    "`role=hero` on `@image` is not a recommended role (known: primary_visual, supporting_visual, diagram, character, background, callout, comparison, emphasis); it is kept as written"
+                ),
+                &ValidationIssue::new(
+                    Some(1),
+                    "`intent=wobble` on `@image` is not a recommended intent (known: fade, slide, zoom, emphasis, cut); it is kept as written"
+                ),
+            ]
+        );
     }
 
     #[test]

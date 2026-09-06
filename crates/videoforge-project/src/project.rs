@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::path::RelativeAssetPath;
+use crate::presentation::Presentation;
 
 /// Current IR schema version. Bump when a change is not backwards compatible.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -269,6 +270,9 @@ pub struct ImageClip {
     pub duration_ms: u64,
     #[serde(default)]
     pub transform: Transform,
+    /// Semantic role / intent (issue #16); `None` when the author said nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<Presentation>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -285,6 +289,9 @@ pub struct CharacterClip {
     pub speaker: Option<String>,
     #[serde(default)]
     pub transform: Transform,
+    /// Semantic role / intent (issue #16); `None` when the author said nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<Presentation>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -587,6 +594,11 @@ mod tests {
                     layer: 10,
                     fit: FitMode::Cover,
                 },
+                presentation: Some(Presentation {
+                    role: Some("primary_visual".into()),
+                    intent: Some("fade".into()),
+                    intent_duration_ms: Some(300),
+                }),
                 extra: BTreeMap::from([("note".to_string(), serde_json::json!("hero"))]),
             })],
         });
@@ -600,6 +612,7 @@ mod tests {
                 duration_ms: 3410,
                 speaker: Some("reimu".into()),
                 transform: Transform::default(),
+                presentation: None,
                 extra: BTreeMap::new(),
             })],
         });
@@ -674,6 +687,12 @@ mod tests {
         assert!(json.contains("\"type\": \"sound_effect\""));
         assert!(json.contains("\"kind\": \"bgm\""));
         assert!(json.contains("\"fit\": \"cover\""));
+        assert!(json.contains("\"role\": \"primary_visual\""));
+        let character_json = serde_json::to_string(&p.character_clips()[0]).unwrap();
+        assert!(
+            !character_json.contains("presentation"),
+            "None must be omitted: {character_json}"
+        );
 
         let back = VideoProject::from_json(&json).unwrap();
         assert_eq!(back, p);
@@ -722,6 +741,7 @@ mod tests {
         assert_eq!(image.transform.rotation_deg, 0.0);
         assert_eq!(image.transform.opacity, 1.0);
         assert_eq!(image.transform.fit, FitMode::Contain);
+        assert_eq!(image.presentation, None);
         let bgm = p.bgm_clips()[0];
         assert_eq!(bgm.volume, 1.0);
         assert!(!bgm.looping);

@@ -767,6 +767,29 @@ DaVinci Resolve のノードなど特定 NLE の概念は持ち込まない。
 
 ---
 
+## 11.6 Presentation（P3-02, issue #16）
+
+Image / Character clip は「何のために出すか」「どう見せたいか」を、具体的な
+`Transform` とは別に持てる。
+
+```rust
+pub struct Presentation {
+    pub role: Option<String>,             // primary_visual / supporting_visual / diagram /
+                                          // character / background / callout / comparison / emphasis
+    pub intent: Option<String>,           // fade / slide / zoom / emphasis / cut
+    pub intent_duration_ms: Option<u64>,  // intent の遷移時間。renderer が解釈
+}
+```
+
+閉じた enum ではなく自由記述の `String`。推奨語彙は `videoforge_project::KNOWN_ROLES` /
+`KNOWN_INTENTS` に置き、`videoforge validate` は directive の `role=` / `intent=` が
+語彙外なら **warning**（error ではない）を出す。未知 directive を warning で許容する
+方針と同じで、typo の検出だけを助ける。
+
+`presentation` は省略可（`None`）。fade / slide の実装や role の自動推論は含まない。
+
+---
+
 # 12. Path Model
 
 重要。
