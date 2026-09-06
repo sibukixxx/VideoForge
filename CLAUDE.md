@@ -39,6 +39,11 @@ repo runs offline this way. When invoking the binary in tests or scratch runs, s
 Env vars: `VIDEOFORGE_CACHE_DIR`, `VIDEOFORGE_DATA_DIR`, `VIDEOFORGE_FFMPEG`,
 `VIDEOFORGE_YMM4_PATH`.
 
+Two test files use the real thing when it is around and print `skipped:` otherwise:
+`crates/videoforge-preview/tests/ffmpeg_real.rs` (FFmpeg on `PATH` / `VIDEOFORGE_FFMPEG`) and
+`crates/videoforge-{voicevox,cli}/tests/voicevox_real.rs` (VOICEVOX at `127.0.0.1:50021`, or
+`VIDEOFORGE_VOICEVOX_ENDPOINT`). The manual halves are `docs/testing/*-manual-e2e.md`.
+
 `videoforge export ymm4 --force` is a hidden flag (`hide = true`, absent from `--help`). It is the
 only way to exercise the YMM4 exporter off Windows — the CLI test and macOS development use it.
 Its output has non-Windows paths and is not openable in YMM4.
