@@ -9,6 +9,54 @@ use crate::error::AppError;
 
 pub const CONFIG_VERSION: u32 = 1;
 
+// Upper bounds. These are not engine limits; they exist so that a typo in
+// `videoforge.yaml` fails at load time instead of turning into an
+// out-of-memory FFmpeg invocation, an hour-long hang, or a flood of parallel
+// requests to the TTS engine.
+
+/// 16384 = the largest dimension mainstream H.264 encoders accept.
+const MAX_VIDEO_DIMENSION: u32 = 16384;
+/// Well past any delivery format; anything higher is a typo.
+const MAX_FPS: u32 = 240;
+/// A minute of silence between two lines is already absurd.
+const MAX_DIALOGUE_GAP_MS: u64 = 60_000;
+/// VOICEVOX is a local single-process engine; more parallelism only queues.
+const MAX_CONCURRENCY: usize = 16;
+/// 10 minutes for one line of dialogue.
+const MAX_TIMEOUT_SECS: u64 = 600;
+
+// Voice parameter ranges are the VOICEVOX *editor* slider ranges. The engine
+// API does not constrain them at all (`audioQuerySchema` types them as bare
+// numbers), so values outside these bounds are accepted by the engine and
+// produce unusable audio rather than an error.
+// https://voicevox.hiroshiba.jp/how_to_use/
+const SPEED_SCALE_RANGE: (f32, f32) = (0.5, 2.0);
+const PITCH_SCALE_RANGE: (f32, f32) = (-0.15, 0.15);
+const INTONATION_SCALE_RANGE: (f32, f32) = (0.0, 2.0);
+const VOLUME_SCALE_RANGE: (f32, f32) = (0.0, 2.0);
+
+/// Inclusive bounds check that names the offending field.
+fn check_range<T>(field: &str, value: T, min: T, max: T) -> Result<(), String>
+where
+    T: PartialOrd + std::fmt::Display,
+{
+    if value < min || value > max {
+        return Err(format!(
+            "{field} must be between {min} and {max} (got {value})"
+        ));
+    }
+    Ok(())
+}
+
+/// Inclusive bounds check for a float, rejecting NaN and infinities first —
+/// every comparison against NaN is false, so a range check alone lets it pass.
+fn check_scale(field: &str, value: f32, (min, max): (f32, f32)) -> Result<(), String> {
+    if !value.is_finite() {
+        return Err(format!("{field} must be a finite number (got {value})"));
+    }
+    check_range(field, value, min, max)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -205,6 +253,27 @@ impl Default for VoiceParams {
     }
 }
 
+impl VoiceParams {
+    /// Check every scale against its VOICEVOX range. `speaker_key` only shapes
+    /// the error message (`speakers.reimu.voice.speed_scale`).
+    pub fn validate(&self, speaker_key: &str) -> Result<(), String> {
+        let field = |name: &str| format!("speakers.{speaker_key}.voice.{name}");
+        check_scale(&field("speed_scale"), self.speed_scale, SPEED_SCALE_RANGE)?;
+        check_scale(&field("pitch_scale"), self.pitch_scale, PITCH_SCALE_RANGE)?;
+        check_scale(
+            &field("intonation_scale"),
+            self.intonation_scale,
+            INTONATION_SCALE_RANGE,
+        )?;
+        check_scale(
+            &field("volume_scale"),
+            self.volume_scale,
+            VOLUME_SCALE_RANGE,
+        )?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewConfig {
@@ -296,12 +365,25 @@ impl Config {
                 self.version
             )));
         }
-        if self.video.fps == 0 || self.video.width == 0 || self.video.height == 0 {
-            return Err(invalid("video.width/height/fps must be > 0".into()));
-        }
-        if self.tts.concurrency == 0 {
-            return Err(invalid("tts.concurrency must be >= 1".into()));
-        }
+        check_range("video.width", self.video.width, 1, MAX_VIDEO_DIMENSION).map_err(invalid)?;
+        check_range("video.height", self.video.height, 1, MAX_VIDEO_DIMENSION).map_err(invalid)?;
+        check_range("video.fps", self.video.fps, 1, MAX_FPS).map_err(invalid)?;
+        check_range(
+            "timeline.dialogue_gap_ms",
+            self.timeline.dialogue_gap_ms,
+            0,
+            MAX_DIALOGUE_GAP_MS,
+        )
+        .map_err(invalid)?;
+        check_range("tts.concurrency", self.tts.concurrency, 1, MAX_CONCURRENCY)
+            .map_err(invalid)?;
+        check_range(
+            "tts.timeout_secs",
+            self.tts.timeout_secs,
+            1,
+            MAX_TIMEOUT_SECS,
+        )
+        .map_err(invalid)?;
         if let Err(e) = check_endpoint_allowed(&self.tts.endpoint, self.tts.allow_remote_endpoint) {
             return Err(invalid(format!("tts.endpoint: {e}")));
         }
@@ -326,11 +408,7 @@ impl Config {
                     }
                 }
             }
-            if speaker.voice.speed_scale <= 0.0 {
-                return Err(invalid(format!(
-                    "speakers.{key}.voice.speed_scale must be > 0"
-                )));
-            }
+            speaker.voice.validate(key).map_err(invalid)?;
         }
         Ok(())
     }
@@ -523,5 +601,142 @@ mod tests {
                 "expected {endpoint} to be rejected"
             );
         }
+    }
+
+    /// `speakers.a` with `voice.<field>: <value>` spliced in.
+    fn config_with_voice(field: &str, value: &str) -> Result<Config, AppError> {
+        Config::parse(
+            &format!("speakers:\n  a:\n    voice:\n      {field}: {value}\n"),
+            Path::new("x.yaml"),
+        )
+    }
+
+    fn voice_error(field: &str, value: &str) -> String {
+        config_with_voice(field, value)
+            .expect_err(&format!("{field}: {value} must be rejected"))
+            .to_string()
+    }
+
+    #[test]
+    fn voice_scales_accept_their_documented_bounds() {
+        for (field, value) in [
+            ("speed_scale", "0.5"),
+            ("speed_scale", "2.0"),
+            ("pitch_scale", "-0.15"),
+            ("pitch_scale", "0.15"),
+            ("intonation_scale", "0.0"),
+            ("intonation_scale", "2.0"),
+            ("volume_scale", "0.0"),
+            ("volume_scale", "2.0"),
+        ] {
+            assert!(
+                config_with_voice(field, value).is_ok(),
+                "{field}: {value} is a documented bound and must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn voice_scales_reject_values_past_their_bounds() {
+        for (field, value) in [
+            ("speed_scale", "0.49"),
+            ("speed_scale", "2.01"),
+            ("speed_scale", "0.0"),
+            ("pitch_scale", "-0.16"),
+            ("pitch_scale", "0.16"),
+            ("intonation_scale", "-0.01"),
+            ("intonation_scale", "2.01"),
+            ("volume_scale", "-0.01"),
+            ("volume_scale", "2.01"),
+        ] {
+            let message = voice_error(field, value);
+            assert!(
+                message.contains(&format!("speakers.a.voice.{field}")),
+                "error for {field}: {value} must name the field, got: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn voice_scales_reject_nan_and_infinity() {
+        for (field, value) in [
+            ("speed_scale", ".nan"),
+            ("speed_scale", ".inf"),
+            ("speed_scale", "-.inf"),
+            ("pitch_scale", ".nan"),
+            ("intonation_scale", ".nan"),
+            ("volume_scale", "-.inf"),
+            // f32 overflow: serde_yaml parses this as f64 and narrows to inf.
+            ("speed_scale", "1e40"),
+        ] {
+            let message = voice_error(field, value);
+            assert_eq!(
+                message,
+                format!(
+                    "invalid config x.yaml: speakers.a.voice.{field} must be a finite number (got {})",
+                    if value.contains("nan") { "NaN" } else if value.starts_with('-') { "-inf" } else { "inf" }
+                ),
+                "unexpected message for {field}: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_settings_reject_out_of_range_values() {
+        let bad = |yaml: &str| {
+            Config::parse(
+                &format!("{yaml}\nspeakers:\n  a: {{}}\n"),
+                Path::new("x.yaml"),
+            )
+            .unwrap_err()
+            .to_string()
+        };
+        assert_eq!(
+            bad("video:\n  fps: 0"),
+            "invalid config x.yaml: video.fps must be between 1 and 240 (got 0)"
+        );
+        assert_eq!(
+            bad("video:\n  fps: 241"),
+            "invalid config x.yaml: video.fps must be between 1 and 240 (got 241)"
+        );
+        assert_eq!(
+            bad("video:\n  width: 16385"),
+            "invalid config x.yaml: video.width must be between 1 and 16384 (got 16385)"
+        );
+        assert_eq!(
+            bad("video:\n  height: 0"),
+            "invalid config x.yaml: video.height must be between 1 and 16384 (got 0)"
+        );
+        assert_eq!(
+            bad("tts:\n  concurrency: 0"),
+            "invalid config x.yaml: tts.concurrency must be between 1 and 16 (got 0)"
+        );
+        assert_eq!(
+            bad("tts:\n  concurrency: 17"),
+            "invalid config x.yaml: tts.concurrency must be between 1 and 16 (got 17)"
+        );
+        assert_eq!(
+            bad("tts:\n  timeout_secs: 0"),
+            "invalid config x.yaml: tts.timeout_secs must be between 1 and 600 (got 0)"
+        );
+        assert_eq!(
+            bad("timeline:\n  dialogue_gap_ms: 60001"),
+            "invalid config x.yaml: timeline.dialogue_gap_ms must be between 0 and 60000 (got 60001)"
+        );
+    }
+
+    #[test]
+    fn numeric_settings_accept_their_bounds() {
+        let ok = |yaml: &str| {
+            Config::parse(
+                &format!("{yaml}\nspeakers:\n  a: {{}}\n"),
+                Path::new("x.yaml"),
+            )
+            .is_ok()
+        };
+        assert!(ok("video:\n  fps: 1\n  width: 1\n  height: 1"));
+        assert!(ok("video:\n  fps: 240\n  width: 16384\n  height: 16384"));
+        assert!(ok("tts:\n  concurrency: 16\n  timeout_secs: 600"));
+        assert!(ok("timeline:\n  dialogue_gap_ms: 0"));
     }
 }
