@@ -201,3 +201,51 @@ fn outside_workspace_is_an_error() {
     assert_eq!(code, 1);
     assert!(stderr.contains("workspace not found"), "{stderr}");
 }
+
+#[test]
+fn json_errors_carry_a_stable_machine_readable_code() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (code, stdout, stderr) = run(tmp.path(), &["--json", "validate", "x.md"]);
+
+    assert_eq!(code, 1, "{stderr}");
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect(&stdout);
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["code"], "workspace_not_found");
+}
+
+#[test]
+fn out_of_range_voice_parameters_are_rejected_before_synthesis() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (code, _, _) = run(tmp.path(), &["init"]);
+    assert_eq!(code, 0);
+
+    let config_path = tmp.path().join("videoforge.yaml");
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    std::fs::write(
+        &config_path,
+        config.replace("speed_scale: 1.05", "speed_scale: 12.0"),
+    )
+    .unwrap();
+
+    let (code, stdout, _) = run(
+        tmp.path(),
+        &["--json", "generate", "scripts/sample.md", "--fake-tts"],
+    );
+
+    assert_eq!(code, 1, "{stdout}");
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect(&stdout);
+    assert_eq!(payload["code"], "invalid_config");
+    assert_eq!(
+        payload["error"].as_str().unwrap(),
+        format!(
+            "invalid config {}: speakers.reimu.voice.speed_scale \
+             must be between 0.5 and 2 (got 12)",
+            // the CLI reports the canonicalized workspace path
+            config_path.canonicalize().unwrap().display()
+        )
+    );
+    assert!(
+        !tmp.path().join("generated/sample").exists(),
+        "nothing may be generated from an invalid config"
+    );
+}
