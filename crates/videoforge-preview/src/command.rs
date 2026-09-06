@@ -2,9 +2,11 @@
 //! whole plan is unit-testable without FFmpeg installed.
 //!
 //! Paths inside the filter graph are kept *relative to the project directory*
-//! (FFmpeg runs with `cwd = project_dir`), which sidesteps drive-letter and
-//! quoting issues on Windows. Only the optional font file may be absolute and
-//! is escaped.
+//! (FFmpeg runs with `cwd = project_dir`), so a workspace path containing
+//! spaces, Japanese, quotes or a drive letter never enters the graph at all.
+//! Only the optional font file may be absolute; it goes through
+//! [`quote_filter_value`], whose escaping rules are documented there and
+//! verified against a real FFmpeg in `tests/ffmpeg_real.rs`.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -296,15 +298,55 @@ fn normalize_color(c: &str) -> String {
     }
 }
 
-/// Quote a value for use inside a filtergraph option (`key='value'`).
-/// Backslashes become `/` (FFmpeg accepts them on Windows), `:` and `'` are
-/// escaped.
+/// Quote a value (a path, typically) for use as a filtergraph option value,
+/// e.g. `drawtext=textfile=<here>`.
+///
+/// FFmpeg parses a `-filter_complex` string in two passes, each with its own
+/// escaping (see "Notes on filtergraph escaping" in `ffmpeg-filters`):
+///
+/// 1. the **graph** pass splits filters on `[],;` and filter options on `=`;
+///    `'...'` protects everything (including `\`) until the next `'`;
+/// 2. the **option** pass then splits the surviving text on `:`; here `\x`
+///    yields `x`, and leading/trailing whitespace is trimmed unless escaped.
+///
+/// So the value is first escaped for pass 2 ([`escape_option_value`]) and the
+/// result is then quoted for pass 1 ([`quote_graph_token`]). A single level —
+/// quoting alone — loses every `'` and `:` in the second pass.
+///
+/// | input        | output            |
+/// |--------------|-------------------|
+/// | `a b`        | `'a b'`           |
+/// | `it's`       | `'it\'\''s'`      |
+/// | `C:\x\y.ttf`  | `'C\:\\x\\y.ttf'` |
+/// | `a,b;[c]=d`  | `'a,b;[c]=d'`     |
+///
+/// Backslashes are kept (escaped), not rewritten to `/`: both are valid path
+/// separators on Windows, and a `\` inside a Unix file name must survive.
 pub fn quote_filter_value(value: &str) -> String {
-    let v = value
-        .replace('\\', "/")
-        .replace('\'', "'\\''")
-        .replace(':', "\\:");
-    format!("'{v}'")
+    quote_graph_token(&escape_option_value(value))
+}
+
+/// Option-pass (second level) escaping: backslash before `\`, `'` and `:`,
+/// and before leading/trailing whitespace so it is not trimmed.
+pub fn escape_option_value(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let last = chars.len().saturating_sub(1);
+    let mut out = String::with_capacity(value.len() + 8);
+    for (i, &c) in chars.iter().enumerate() {
+        let needs_escape =
+            matches!(c, '\\' | '\'' | ':') || (c.is_ascii_whitespace() && (i == 0 || i == last));
+        if needs_escape {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Graph-pass (first level) quoting: wrap in `'...'`, with each embedded `'`
+/// written as `'\''` (close, escaped quote, reopen).
+pub fn quote_graph_token(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Naive wrapping for caption text: hard-wrap lines longer than `max_chars`
@@ -452,7 +494,7 @@ mod tests {
         assert!(s.iter().any(|a| a == "color=c=0x1e1e2e:s=1920x1080:r=30"));
         let fc = &s[s.iter().position(|x| x == "-filter_complex").unwrap() + 1];
         assert!(
-            fc.contains("fontfile='C\\:/Windows/Fonts/meiryo.ttc'"),
+            fc.contains("fontfile='C\\:\\\\Windows\\\\Fonts\\\\meiryo.ttc'"),
             "{fc}"
         );
     }
@@ -499,6 +541,93 @@ mod tests {
             "あいうえ\nおかきく\nけこ"
         );
         assert_eq!(wrap_text("ab\ncd", 10), "ab\ncd");
-        assert_eq!(quote_filter_value("it's"), "'it'\\''s'");
+    }
+
+    /// One row per character class from issue #12. The expected strings are
+    /// what a real FFmpeg accepts — see `tests/ffmpeg_real.rs`.
+    #[test]
+    fn filter_value_escaping_per_character_class() {
+        let cases: &[(&str, &str)] = &[
+            ("plain.txt", "'plain.txt'"),
+            ("with space.txt", "'with space.txt'"),
+            ("日本語 字幕.txt", "'日本語 字幕.txt'"),
+            ("it's.txt", "'it\\'\\''s.txt'"),
+            ("co:lon.txt", "'co\\:lon.txt'"),
+            ("com,ma.txt", "'com,ma.txt'"),
+            ("semi;colon.txt", "'semi;colon.txt'"),
+            ("br[ack]ets.txt", "'br[ack]ets.txt'"),
+            ("eq=ual.txt", "'eq=ual.txt'"),
+            ("back\\slash.txt", "'back\\\\slash.txt'"),
+            (" lead.txt", "'\\ lead.txt'"),
+            ("trail ", "'trail\\ '"),
+            ("pct%.txt", "'pct%.txt'"),
+            // Windows drive path: the drive colon is escaped, separators kept.
+            (
+                r"C:\Users\霊夢\Fonts\it's.ttf",
+                "'C\\:\\\\Users\\\\霊夢\\\\Fonts\\\\it\\'\\''s.ttf'",
+            ),
+            // Forward slashes on Windows need no escaping at all.
+            (
+                "C:/Windows/Fonts/meiryo.ttc",
+                "'C\\:/Windows/Fonts/meiryo.ttc'",
+            ),
+            // UNC path: only backslashes to escape.
+            (
+                r"\\server\share\fonts\a.ttf",
+                "'\\\\\\\\server\\\\share\\\\fonts\\\\a.ttf'",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(&quote_filter_value(input), expected, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn escaping_levels_compose() {
+        assert_eq!(escape_option_value("a:b'c\\d"), "a\\:b\\'c\\\\d");
+        assert_eq!(quote_graph_token("a'b"), "'a'\\''b'");
+        assert_eq!(
+            quote_filter_value("it's"),
+            quote_graph_token(&escape_option_value("it's"))
+        );
+    }
+
+    /// Special characters in the *workspace* path never reach the graph: every
+    /// path inside it is relative to the project dir (FFmpeg's cwd).
+    #[test]
+    fn workspace_path_stays_out_of_the_filter_graph() {
+        let root = if cfg!(windows) {
+            PathBuf::from(r"C:\Users\霊夢\my videos\it's [v2]; a,b")
+        } else {
+            PathBuf::from("/home/霊夢/my videos/it's [v2]; a,b")
+        };
+        let scratch = root.join(".preview.mp4.tmp");
+        let plan = RenderPlan::build(
+            &project(true),
+            "#000000",
+            None,
+            root.join("preview.mp4"),
+            scratch.clone(),
+            relative_to(&scratch, &root).unwrap(),
+        );
+        assert_eq!(plan.scratch_rel, ".preview.mp4.tmp");
+        let args: Vec<String> = build_args(&plan)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let fc = &args[args.iter().position(|x| x == "-filter_complex").unwrap() + 1];
+        assert!(!fc.contains("霊夢"), "{fc}");
+        assert!(!fc.contains("my videos"), "{fc}");
+        assert!(
+            fc.contains("textfile='.preview.mp4.tmp/caption-001.txt'"),
+            "{fc}"
+        );
+        // The output path is a plain argument, not part of the graph.
+        assert_eq!(
+            args.last().unwrap(),
+            &root.join("preview.mp4").to_string_lossy()
+        );
+        // Background and audio inputs are plain relative arguments too.
+        assert!(args.contains(&"assets/background/default.png".to_string()));
     }
 }

@@ -6,7 +6,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use super::{TtsCache, TtsEngine, TtsRequest};
+use super::{BoundCache, TtsEngine, TtsRequest};
 use crate::config::VoiceParams;
 use crate::error::AppError;
 use crate::progress::{GenerationStage, ProgressSink};
@@ -35,9 +35,12 @@ pub struct SynthesizedDialogue {
 
 /// Synthesize all jobs. Results are returned in job order regardless of
 /// completion order. Fails fast on the first error or cancellation.
+///
+/// `cache` must be bound to the engine build that will do the synthesis (see
+/// [`super::bind_cache`]); pass `None` to bypass the cache entirely.
 pub async fn synthesize_all(
     engine: Arc<dyn TtsEngine>,
-    cache: Option<Arc<TtsCache>>,
+    cache: Option<BoundCache>,
     jobs: Vec<SynthesisJob>,
     concurrency: usize,
     cancel: CancellationToken,
@@ -62,7 +65,7 @@ pub async fn synthesize_all(
             if cancel.is_cancelled() {
                 return Err(AppError::Cancelled);
             }
-            let result = synthesize_one(engine.as_ref(), cache.as_deref(), &job, &cancel).await?;
+            let result = synthesize_one(engine.as_ref(), cache.as_ref(), &job, &cancel).await?;
             let current = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             progress.on_stage(&GenerationStage::Synthesizing {
                 current,
@@ -106,12 +109,15 @@ pub async fn synthesize_all(
 
 async fn synthesize_one(
     engine: &dyn TtsEngine,
-    cache: Option<&TtsCache>,
+    cache: Option<&BoundCache>,
     job: &SynthesisJob,
     cancel: &CancellationToken,
 ) -> Result<SynthesizedDialogue, AppError> {
-    let key = TtsCache::key(engine.id(), &job.text, &job.voice);
-    let (wav, cached) = match cache.and_then(|c| c.get(&key)) {
+    let key = cache.map(|c| c.key(&job.text, &job.voice));
+    let hit = cache
+        .zip(key.as_deref())
+        .and_then(|(c, key)| c.cache.get(key));
+    let (wav, cached) = match hit {
         Some(wav) if parse_wav_info(&wav).is_ok() => (wav, true),
         _ => {
             let request = TtsRequest {
@@ -122,8 +128,8 @@ async fn synthesize_one(
                 _ = cancel.cancelled() => return Err(AppError::Cancelled),
                 r = engine.synthesize(&request) => r?,
             };
-            if let Some(c) = cache {
-                if let Err(e) = c.put(&key, &audio.wav) {
+            if let Some((c, key)) = cache.zip(key.as_deref()) {
+                if let Err(e) = c.cache.put(key, &audio.wav) {
                     tracing::warn!("tts cache write failed: {e}");
                 }
             }
@@ -157,7 +163,7 @@ async fn synthesize_one(
 mod tests {
     use super::*;
     use crate::progress::NoopProgress;
-    use crate::tts::FakeTtsEngine;
+    use crate::tts::{bind_cache, FakeTtsEngine, TtsCache};
 
     fn job(index: usize, text: &str) -> SynthesisJob {
         SynthesisJob {
@@ -172,13 +178,15 @@ mod tests {
     #[tokio::test]
     async fn synthesizes_in_order_with_cache() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(TtsCache::new(dir.path()));
         let engine: Arc<dyn TtsEngine> = Arc::new(FakeTtsEngine::default());
+        let cache = bind_cache(engine.as_ref(), Arc::new(TtsCache::new(dir.path())))
+            .await
+            .unwrap();
         let jobs = vec![job(1, "こんにちは"), job(2, "やあ"), job(3, "こんにちは")];
 
         let out = synthesize_all(
             Arc::clone(&engine),
-            Some(Arc::clone(&cache)),
+            Some(cache.clone()),
             jobs.clone(),
             4,
             CancellationToken::new(),
@@ -205,6 +213,39 @@ mod tests {
         .await
         .unwrap();
         assert!(again.iter().all(|d| d.cached));
+    }
+
+    #[tokio::test]
+    async fn an_engine_upgrade_misses_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine: Arc<dyn TtsEngine> = Arc::new(FakeTtsEngine::default());
+        let store = Arc::new(TtsCache::new(dir.path()));
+        let v1 = BoundCache {
+            cache: Arc::clone(&store),
+            engine_id: "fake".into(),
+            engine_version: "0.21.1".into(),
+        };
+        let v2 = BoundCache {
+            engine_version: "0.22.0".into(),
+            ..v1.clone()
+        };
+        let run = |cache: BoundCache| {
+            synthesize_all(
+                Arc::clone(&engine),
+                Some(cache),
+                vec![job(1, "こんにちは")],
+                1,
+                CancellationToken::new(),
+                Arc::new(NoopProgress),
+            )
+        };
+        assert!(!run(v1.clone()).await.unwrap()[0].cached);
+        assert!(run(v1).await.unwrap()[0].cached, "same version: hit");
+        assert!(
+            !run(v2.clone()).await.unwrap()[0].cached,
+            "new version: miss"
+        );
+        assert!(run(v2).await.unwrap()[0].cached);
     }
 
     #[tokio::test]

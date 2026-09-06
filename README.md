@@ -21,19 +21,19 @@ Claude Code / Codex / 人間
 
 ## Status
 
-MVP v0.1 の **Core + CLI**（設計書 Phase 1〜6）を実装済み。Tauri GUI（Phase 7）は未着手。
+MVP v0.1 の **Core + CLI**（設計書 Phase 1〜6）と Tauri GUI MVP（Phase 7, `apps/desktop`）を実装済み。GUI の実機確認（Windows / macOS）は未実施。
 
 | 機能 | 状態 |
 |---|---|
 | `videoforge init` / `doctor` / `validate` / `generate` / `export ymm4` / `bundle ymm4` / `speakers` | ✅ |
 | Script parser（Front Matter, `話者:` ブロック, 未知 directive は warning） | ✅ |
 | VideoProject IR（ms 基準、Workspace 相対パスのみ許可、未知フィールド保持） | ✅ |
-| VOICEVOX（audio_query → override → synthesis）、OS キャッシュ、concurrency、cancel | ✅ |
+| VOICEVOX（audio_query → override → synthesis）、OS キャッシュ（engine version 込みの key）、concurrency、cancel | ✅ |
 | Timeline / SRT | ✅ |
-| FFmpeg preview（背景 + 音声配置 + 字幕 + speaker 名 + fade） | ✅ command builder はテスト済。実レンダリングは要 FFmpeg |
+| FFmpeg preview（背景 + 音声配置 + 字幕 + speaker 名 + fade） | ✅ command builder + filtergraph escaping はテスト済。実 FFmpeg の統合テストは ffmpeg が見つかった時だけ実行（`docs/testing/ffmpeg-path-escaping.md`） |
 | YMM4 exporter（Template Patch 方式、Windows path materialize、Windows 限定） | ✅ 合成 fixture でテスト済。**実 YMM4 template での Phase 0 検証は未実施** |
 | Handoff bundle（dir + zip） | ✅ |
-| Tauri GUI | ⏳ |
+| Tauri GUI（`apps/desktop`: Workspace / Script / Validate / Generate + 進捗 / Preview / Doctor / YMM4 export or bundle） | ✅ MVP。実機での起動確認は `apps/desktop/README.md` のチェックリスト |
 
 ## Quick start
 
@@ -111,6 +111,7 @@ crates/
 ├── videoforge-preview      PreviewRenderer impl (FFmpeg)
 ├── videoforge-export-ymm4  ProjectExporter impl (.ymmp template patch) + handoff bundle
 └── videoforge-cli          `videoforge` binary
+apps/desktop/               Tauri v2 + React GUI（src-tauri は独立した cargo workspace）
 fixtures/                   sample script, synthetic YMM4 template
 docs/design/                設計書
 ```
@@ -125,7 +126,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-CI 定義（Windows / macOS / Ubuntu matrix + offline smoke）は `docs/ci/github-actions-ci.yml` にある。`.github/workflows/ci.yml` へ移動して有効化する（`docs/ci/README.md` 参照）。
+GUI: `cd apps/desktop && pnpm install && pnpm tauri dev`（詳細は `apps/desktop/README.md`）。
+
+CI 定義（Windows / macOS / Ubuntu matrix + offline smoke + desktop build）は `docs/ci/github-actions-ci.yml` にある。`.github/workflows/ci.yml` へ移動して有効化する（`docs/ci/README.md` 参照）。
 
 環境変数: `VIDEOFORGE_CACHE_DIR`（TTS cache の場所）、`VIDEOFORGE_FFMPEG`（ffmpeg バイナリ）、`VIDEOFORGE_YMM4_PATH`（YukkuriMovieMaker.exe）。
 
@@ -133,4 +136,4 @@ CI 定義（Windows / macOS / Ubuntu matrix + offline smoke）は `docs/ci/githu
 
 1. **Phase 0 spike**: 実 YMM4 で template を作成し、`export ymm4` の出力が YMM4 で開けることを Windows で確認（最大の技術リスク）
 2. FFmpeg 実機での preview 確認（日本語フォント指定 `preview.font`）
-3. Tauri v2 + React GUI（`apps/desktop`）を Core/CLI の上に被せる
+3. Tauri GUI を Windows / macOS の実機で起動確認（`apps/desktop/README.md` のチェックリスト）

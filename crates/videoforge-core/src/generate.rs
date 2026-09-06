@@ -45,7 +45,7 @@ use crate::error::AppError;
 use crate::manifest::{Manifest, MANIFEST_SCHEMA_VERSION};
 use crate::preview::{PreviewRenderer, PreviewRequest};
 use crate::progress::{GenerationStage, NoopProgress, ProgressSink};
-use crate::tts::{synthesize_all, SynthesisJob, TtsCache, TtsEngine};
+use crate::tts::{bind_cache, synthesize_all, SynthesisJob, TtsCache, TtsEngine};
 use crate::validate;
 use crate::workspace::Workspace;
 use crate::GENERATOR_VERSION;
@@ -200,9 +200,24 @@ async fn run_pipeline(
             voice: d.voice,
         })
         .collect();
+    // The cache key includes the engine version. If the engine does not tell
+    // us its version we run without the cache rather than guess one — an
+    // engine upgrade must never replay audio from the previous build.
+    let cache = match &deps.cache {
+        Some(cache) => match bind_cache(deps.tts.as_ref(), Arc::clone(cache)).await {
+            Ok(bound) => Some(bound),
+            Err(e) => {
+                let reason = format!("TTS cache disabled: engine version unavailable ({e})");
+                tracing::warn!("{reason}");
+                warnings.push(reason);
+                None
+            }
+        },
+        None => None,
+    };
     let synthesized = synthesize_all(
         Arc::clone(&deps.tts),
-        deps.cache.clone(),
+        cache,
         jobs,
         config.tts.concurrency,
         cancel.clone(),
@@ -561,6 +576,70 @@ mod tests {
         generate(&ws, &script, options(), deps())
             .await
             .expect("the lock from the first run must not outlive it");
+    }
+
+    /// Synthesizes fine but cannot report a version: the cache must be
+    /// bypassed for the run and the manifest must say so.
+    struct VersionlessEngine(FakeTtsEngine);
+
+    #[async_trait::async_trait]
+    impl TtsEngine for VersionlessEngine {
+        fn id(&self) -> &str {
+            "versionless"
+        }
+        async fn health(&self) -> Result<crate::tts::EngineInfo, AppError> {
+            Err(AppError::Other("no /version endpoint".into()))
+        }
+        async fn list_speakers(&self) -> Result<Vec<crate::tts::Speaker>, AppError> {
+            self.0.list_speakers().await
+        }
+        async fn synthesize(
+            &self,
+            request: &crate::tts::TtsRequest,
+        ) -> Result<crate::tts::SynthesizedAudio, AppError> {
+            self.0.synthesize(request).await
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_engine_version_bypasses_the_cache_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        init::init(dir.path(), Some("t")).unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let script = ws.scripts_dir().join("sample.md");
+        let cache_dir = dir.path().join("cache");
+        let cache = Arc::new(TtsCache::new(&cache_dir));
+
+        let run = || {
+            let mut deps = GenerateDeps::new(Arc::new(VersionlessEngine(FakeTtsEngine::default())));
+            deps.cache = Some(Arc::clone(&cache));
+            generate(&ws, &script, GenerateOptions::default(), deps)
+        };
+        let out = run().await.unwrap();
+        assert!(
+            out.manifest
+                .warnings
+                .iter()
+                .any(|w| w.contains("TTS cache disabled")),
+            "{:?}",
+            out.manifest.warnings
+        );
+        assert!(
+            !cache_dir.exists() || std::fs::read_dir(&cache_dir).unwrap().next().is_none(),
+            "nothing may be written to the cache without an engine version"
+        );
+        // Still nothing cached on the second run: the run is predictable, not
+        // partially cached.
+        run().await.unwrap();
+        assert!(!cache_dir.join("v2").exists());
+
+        // A versioned engine on the same cache dir writes and then reads back.
+        let mut deps = GenerateDeps::new(Arc::new(FakeTtsEngine::default()));
+        deps.cache = Some(Arc::clone(&cache));
+        generate(&ws, &script, GenerateOptions::default(), deps)
+            .await
+            .unwrap();
+        assert!(cache_dir.join("v2").is_dir());
     }
 
     #[tokio::test]

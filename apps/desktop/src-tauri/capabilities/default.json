@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Main window: core IPC plus the native file/folder pickers. Everything else (file access, process launch) goes through typed commands in src/commands.rs.",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:default"]
+}

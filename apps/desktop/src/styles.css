@@ -1,0 +1,60 @@
+:root {
+  color-scheme: dark;
+  --bg: #1e1e2e;
+  --panel: #262637;
+  --border: #3a3a50;
+  --fg: #e6e6ef;
+  --muted: #9a9ab0;
+  --accent: #ff8c28;
+  --ok: #7ad38a;
+  --warn: #e6c25a;
+  --err: #ff6b6b;
+  font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+  font-size: 13px;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); }
+.app { display: flex; flex-direction: column; height: 100vh; }
+.topbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.topbar h1 { font-size: 16px; margin: 0 8px 0 0; }
+.spacer { flex: 1; }
+.layout { display: grid; grid-template-columns: 1.2fr 0.9fr 1.1fr; gap: 8px; padding: 8px; flex: 1; min-height: 0; }
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: auto; }
+.panel h2 { font-size: 13px; margin: 0; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+.panel h3 { font-size: 12px; margin: 6px 0 0; color: var(--muted); }
+.row { display: flex; align-items: center; gap: 8px; }
+.row select { flex: 1; min-width: 0; }
+.actions { flex-wrap: wrap; }
+.editor { flex: 1; min-height: 240px; width: 100%; resize: none; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; line-height: 1.5; background: #16161f; color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; }
+button { background: #33334a; color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 6px 12px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: 0.45; cursor: default; }
+button.primary { background: var(--accent); color: #1a1a1a; border-color: transparent; font-weight: 600; }
+button.danger { background: #5a2a2a; }
+button.small { padding: 3px 8px; font-size: 12px; }
+button.link { background: none; border: none; font-size: 16px; }
+select, input[type="text"] { background: #16161f; color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 5px 8px; }
+select.inline { font-size: 12px; text-transform: none; letter-spacing: 0; }
+label { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
+.muted { color: var(--muted); }
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+code, .code { font-family: ui-monospace, Menlo, Consolas, monospace; }
+.banner { display: flex; align-items: center; gap: 10px; margin: 8px 8px 0; padding: 8px 12px; border-radius: 6px; }
+.banner.error { background: #3d2323; border: 1px solid var(--err); }
+.banner .code { background: #1a1a1a; padding: 2px 6px; border-radius: 3px; color: var(--err); }
+.banner .message { flex: 1; white-space: pre-wrap; }
+.log { flex: 0 0 auto; max-height: 220px; overflow: auto; background: #16161f; border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+.line { white-space: pre-wrap; }
+.line.warn { color: var(--warn); }
+.line.error { color: var(--err); }
+progress { width: 100%; accent-color: var(--accent); }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+td { padding: 3px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
+td.num { width: 1%; white-space: nowrap; font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--muted); }
+tr.status-ok td:first-child { color: var(--ok); }
+tr.status-warn td:first-child { color: var(--warn); }
+tr.status-fail td:first-child { color: var(--err); }
+.preview { width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 4px; }
+.preview.placeholder { display: flex; align-items: center; justify-content: center; color: var(--muted); }
+.notice { background: #2b2b3d; border: 1px dashed var(--border); border-radius: 6px; padding: 10px; }
+.notice p { margin: 0 0 8px; }

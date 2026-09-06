@@ -23,6 +23,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # Real-FFmpeg tests (crates/videoforge-preview/tests/ffmpeg_real.rs)
+      # skip themselves when no ffmpeg is on PATH; installing one here is
+      # what makes them run on every OS of the matrix (issue #12).
+      - uses: FedericoCarboni/setup-ffmpeg@v3
+        id: ffmpeg
+        continue-on-error: true
       - name: fmt
         run: cargo fmt --all --check
       - name: clippy
@@ -50,5 +56,47 @@ jobs:
             ! "$BIN" export ymm4 generated/sample/project.vfp.json
           fi
 
-  # The desktop app (apps/desktop, Tauri + React) is not part of the repo yet;
-  # `pnpm test` / `pnpm build` will be added here once it lands (design §40).
+  desktop:
+    name: desktop (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - name: Linux WebKitGTK prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+      - run: pnpm install --frozen-lockfile
+      - name: frontend typecheck + build
+        run: pnpm build
+      - name: rust fmt
+        run: cargo fmt --check
+        working-directory: apps/desktop/src-tauri
+      - name: rust clippy
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: apps/desktop/src-tauri
+      - name: rust test
+        run: cargo test
+        working-directory: apps/desktop/src-tauri
