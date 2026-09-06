@@ -4,8 +4,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use videoforge_project::{Presentation, KNOWN_INTENTS, KNOWN_ROLES};
-use videoforge_script::{DirectiveKind, Script, ScriptError};
+use videoforge_script::{Script, ScriptError};
+
+use crate::directives::{resolve_directives, ResolvedDirective};
 
 use crate::config::{Config, VoiceParams};
 use crate::error::AppError;
@@ -18,7 +19,7 @@ pub struct ValidationIssue {
 }
 
 impl ValidationIssue {
-    fn new(line: Option<usize>, message: impl Into<String>) -> Self {
+    pub fn new(line: Option<usize>, message: impl Into<String>) -> Self {
         Self {
             line,
             message: message.into(),
@@ -48,6 +49,9 @@ pub struct ValidationReport {
     pub errors: Vec<ValidationIssue>,
     pub warnings: Vec<ValidationIssue>,
     pub dialogues: Vec<ResolvedDialogue>,
+    /// Presentation directives with their assets checked (issue #18).
+    #[serde(default)]
+    pub directives: Vec<ResolvedDirective>,
     pub total_chars: usize,
 }
 
@@ -144,39 +148,10 @@ pub fn validate_script(
         }
     }
 
-    for d in &script.directives {
-        let (directive, attributes) = match &d.kind {
-            DirectiveKind::Image { attributes, .. } => ("@image", attributes),
-            DirectiveKind::Character { attributes, .. } => ("@character", attributes),
-            DirectiveKind::Bgm { .. }
-            | DirectiveKind::Se { .. }
-            | DirectiveKind::Transition { .. } => continue,
-        };
-        if let Some(role) = attributes
-            .get("role")
-            .filter(|r| !Presentation::is_known_role(r))
-        {
-            report.warnings.push(ValidationIssue::new(
-                Some(d.line),
-                format!(
-                    "`role={role}` on `{directive}` is not a recommended role (known: {}); it is kept as written",
-                    KNOWN_ROLES.join(", ")
-                ),
-            ));
-        }
-        if let Some(intent) = attributes
-            .get("intent")
-            .filter(|i| !Presentation::is_known_intent(i))
-        {
-            report.warnings.push(ValidationIssue::new(
-                Some(d.line),
-                format!(
-                    "`intent={intent}` on `{directive}` is not a recommended intent (known: {}); it is kept as written",
-                    KNOWN_INTENTS.join(", ")
-                ),
-            ));
-        }
-    }
+    let resolution = resolve_directives(script, config, workspace);
+    report.errors.extend(resolution.errors);
+    report.warnings.extend(resolution.warnings);
+    report.directives = resolution.directives;
 
     if let Some(bg) = &config.preview.background {
         if config.preview.enabled {

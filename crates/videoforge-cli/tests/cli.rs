@@ -249,3 +249,95 @@ fn out_of_range_voice_parameters_are_rejected_before_synthesis() {
         "nothing may be generated from an invalid config"
     );
 }
+
+#[test]
+fn directives_become_clips_and_missing_assets_are_warnings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("visual");
+    let (code, stdout, stderr) = run(tmp.path(), &["init", "visual"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    for asset in ["assets/image/chart.png", "assets/bgm/main.mp3"] {
+        std::fs::write(ws.join(asset), b"not really media").unwrap();
+    }
+    std::fs::write(
+        ws.join("scripts/visual.md"),
+        "@bgm assets/bgm/main.mp3[volume=0.6, loop=true]\n@image assets/image/chart.png[role=diagram]\n@transition fade[duration_ms=300]\n霊夢:\nこのグラフを見てください。\n\n@se assets/se/missing.wav\n魔理沙:\nなるほどな。\n",
+    )
+    .unwrap();
+
+    let (code, stdout, _) = run(&ws, &["validate", "scripts/visual.md"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains("Directives: 3 (1 with a missing asset)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("`@se` asset `assets/se/missing.wav` not found; the clip is skipped"),
+        "{stdout}"
+    );
+
+    let (code, stdout, stderr) = run(
+        &ws,
+        &[
+            "generate",
+            "scripts/visual.md",
+            "--fake-tts",
+            "--no-preview",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let out_dir = ws.join("generated").join("visual");
+    assert!(out_dir.join("assets/image/chart.png").is_file());
+    assert!(out_dir.join("assets/bgm/main.mp3").is_file());
+
+    let project: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out_dir.join("project.vfp.json")).unwrap())
+            .unwrap();
+    let tracks: Vec<&str> = project["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(tracks, vec!["audio", "caption", "image", "bgm"]);
+    let second_start = project["tracks"][0]["clips"][1]["start_ms"]
+        .as_u64()
+        .unwrap();
+    let total = project["tracks"][0]["clips"][1]["start_ms"]
+        .as_u64()
+        .unwrap()
+        + project["tracks"][0]["clips"][1]["duration_ms"]
+            .as_u64()
+            .unwrap();
+    assert!(second_start > 0);
+    let image = &project["tracks"][2]["clips"][0];
+    assert_eq!(image["type"], "image");
+    assert_eq!(image["source"], "assets/image/chart.png");
+    assert_eq!(image["start_ms"], 0);
+    assert_eq!(
+        image["duration_ms"], total,
+        "image runs to the end: no later @image"
+    );
+    assert_eq!(image["presentation"]["role"], "diagram");
+    assert_eq!(image["presentation"]["intent"], "fade");
+    assert_eq!(image["presentation"]["intent_duration_ms"], 300);
+    let bgm = &project["tracks"][3]["clips"][0];
+    assert_eq!(bgm["type"], "bgm");
+    assert_eq!(bgm["volume"], 0.6);
+    assert_eq!(bgm["looping"], true);
+    assert_eq!(bgm["duration_ms"], total);
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out_dir.join("manifest.json")).unwrap())
+            .unwrap();
+    assert!(
+        manifest["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap()
+                == "line 7: `@se` asset `assets/se/missing.wav` not found; the clip is skipped"),
+        "{manifest}"
+    );
+}

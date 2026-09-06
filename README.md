@@ -26,10 +26,10 @@ MVP v0.1 の **Core + CLI**（設計書 Phase 1〜6）と Tauri GUI MVP（Phase 
 | 機能 | 状態 |
 |---|---|
 | `videoforge init` / `doctor` / `validate` / `generate` / `export ymm4` / `bundle ymm4` / `speakers` | ✅ |
-| Script parser（Front Matter, `話者:` ブロック, 未知 directive は warning） | ✅ |
-| VideoProject IR（ms 基準、Workspace 相対パスのみ許可、未知フィールド保持） | ✅ |
-| VOICEVOX（audio_query → override → synthesis）、OS キャッシュ（engine version 込みの key）、concurrency、cancel | ✅ |
-| Timeline / SRT | ✅ |
+| Script parser（Front Matter, `話者:` ブロック, `@image` / `@character` / `@bgm` / `@se` / `@transition` directive, 未知 directive は warning） | ✅ |
+| VideoProject IR（ms 基準、Workspace 相対パスのみ許可、未知フィールド保持、image / character / bgm / se clip + presentation） | ✅ |
+| VOICEVOX（audio_query → override → synthesis）、OS キャッシュ（engine version 込みの key）、concurrency、cancel | ✅ 実 VOICEVOX の統合テストは engine が居る時だけ実行（`docs/testing/voicevox-manual-e2e.md`、macOS 確認済） |
+| Timeline / SRT（directive → clip 配置を含む） | ✅ |
 | FFmpeg preview（背景 + 音声配置 + 字幕 + speaker 名 + fade） | ✅ command builder + filtergraph escaping はテスト済。実 FFmpeg の統合テストは ffmpeg が見つかった時だけ実行（`docs/testing/ffmpeg-path-escaping.md`） |
 | YMM4 exporter（Template Patch 方式、Windows path materialize、Windows 限定） | ✅ 合成 fixture でテスト済。**実 YMM4 template での Phase 0 検証は未実施** |
 | Handoff bundle（dir + zip） | ✅ |
@@ -83,7 +83,29 @@ template: yukkuri-tech
 ところが今は状況がかなり変わっているぜ。
 ```
 
-話者名は `videoforge.yaml` の `speakers` キーまたは alias。`@pause` などの directive は v0.1 では warning として無視される。
+話者名は `videoforge.yaml` の `speakers` キーまたは alias。
+
+画像・立ち絵・BGM・効果音は `@` directive で指定する（属性は話者ヘッダと同じ `[key=value, ...]`）。
+directive は直後の台詞と一緒に始まり、素材は Workspace 相対パスで `assets/` 配下に置く。
+
+```markdown
+@bgm assets/bgm/main.mp3[volume=0.6, loop=true]
+
+@image assets/image/chart.png[role=diagram, duration_ms=3000]
+@character reimu[expression=happy]
+@transition fade[duration_ms=300]
+霊夢:
+このグラフを見てください。
+
+@se assets/se/pop.wav
+魔理沙:
+なるほどな。
+```
+
+長さの既定（`duration_ms` 省略時）: `@image` は次の `@image` まで、`@character` は同じ話者の次の立ち絵まで、
+`@bgm` は次の `@bgm` まで、`@se` は 1 秒。素材が無い directive は warning になり、その clip だけ飛ばして生成は続く。
+`@character <name>` は `assets/character/<話者 key>/<expression>.png`（既定 `default.png`）を探す。
+`@pause` などその他の directive は warning として無視される。
 
 ## YMM4 template contract
 

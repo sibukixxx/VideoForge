@@ -944,6 +944,32 @@ fn millis_to_frame(ms: u64, fps: u32) -> u32 {
 }
 ```
 
+## 17.1 演出 directive の配置（P3-04, issue #18）
+
+`schedule()` の結果（dialogue の start/end）を **消費するだけ** で、dialogue の
+スケジューリング自体は変えない。
+
+- 各 directive は「直後の dialogue」の `start_ms` から始まる
+- 長さは属性 `duration_ms` があればそれ。無ければ
+  - `@image`: 次の `@image` が始まるまで、無ければタイムライン終端まで
+  - `@character`: 同じ話者の次の `@character` まで、無ければ終端まで
+  - `@bgm`: 次の `@bgm` まで、無ければ終端まで
+  - `@se`: 1000ms（`DEFAULT_SOUND_EFFECT_MS`）
+- どの clip も最後の dialogue の終端を超えない（超える指定は切り詰める）
+- `@transition <name>[duration_ms=N]` は同じ dialogue に付いた image / character の
+  `presentation.intent` / `intent_duration_ms` になる。相手が居なければ warning
+- track は `image` / `character` / `bgm` / `se` を clip がある分だけ、audio / caption の後ろに追加
+
+asset の解決は `videoforge-core::directives`（validate と generate で共用）:
+
+- path は `RelativeAssetPath` + `Workspace::resolve` で検証し、Workspace 外へ出る指定は **error**
+- asset が無い・属性が未知・数値が不正・末尾で dialogue が続かない → **warning** にして
+  その clip / 属性だけ読み飛ばす（generate は失敗しない）
+- `@character <name>[expression=e]` は `assets/character/<speaker key>/<e>.png`
+  （`src=` で上書き可、`e` の既定は `default`）。`<name>` が話者/alias なら
+  `CharacterClip.speaker` にその key が入る
+- 存在する asset は Workspace と同じ相対パスで `generated/<slug>/` へコピーする
+
 ---
 
 # 18. Preview Renderer

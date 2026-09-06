@@ -266,6 +266,24 @@ async fn run_pipeline(
         None => None,
     };
 
+    // --- Directive assets (image / character / bgm / se) -----------------
+    // Copied under the same workspace-relative path so the project's asset
+    // paths are valid both in the workspace and in generated/<slug>/.
+    // Missing assets were already reported as warnings by validation.
+    let mut visual_events = Vec::new();
+    let mut copied = std::collections::BTreeSet::new();
+    for d in report.directives.iter().filter(|d| d.exists) {
+        if copied.insert(d.source.as_str().to_string()) {
+            let src = workspace.resolve(d.source.as_str())?;
+            let dst = d.source.resolve(tmp_dir);
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| AppError::write(parent, e))?;
+            }
+            std::fs::copy(&src, &dst).map_err(|e| AppError::write(&dst, e))?;
+        }
+        visual_events.push(d.event.clone());
+    }
+
     // --- Timeline --------------------------------------------------------
     if cancel.is_cancelled() {
         return Err(AppError::Cancelled);
@@ -283,6 +301,7 @@ async fn run_pipeline(
         },
         dialogues,
         background,
+        visual_events,
         options: TimelineOptions {
             dialogue_gap_ms: config.timeline.dialogue_gap_ms,
         },
