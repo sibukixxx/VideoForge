@@ -1,0 +1,19 @@
+[package]
+name = "videoforge-export-ymm4"
+description = "YukkuriMovieMaker4 (.ymmp) template-patch exporter and handoff bundle builder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+videoforge-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+zip = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

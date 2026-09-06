@@ -1,0 +1,75 @@
+{
+  "FilePath": "C:\\Users\\example\\Videos\\VideoForge\\templates\\ymm4\\default.ymmp",
+  "Timelines": [
+    {
+      "Items": [
+        {
+          "$type": "YukkuriMovieMaker.Project.Items.TextItem, YukkuriMovieMaker",
+          "Text": "VideoForge caption prototype (reimu)",
+          "Font": "Meiryo UI",
+          "FontSize": { "Values": [ { "Value": 48.0 } ], "Span": 0.0 },
+          "FontColor": "#FFFFFFFF",
+          "Style": 1,
+          "StyleColor": "#FFB03060",
+          "Frame": 0,
+          "Length": 60,
+          "Layer": 3,
+          "Remark": "VF_PROTO_CAPTION_REIMU",
+          "IsLocked": false,
+          "IsHidden": false,
+          "Group": 0
+        },
+        {
+          "$type": "YukkuriMovieMaker.Project.Items.TextItem, YukkuriMovieMaker",
+          "Text": "VideoForge caption prototype (marisa)",
+          "Font": "Meiryo UI",
+          "FontSize": { "Values": [ { "Value": 48.0 } ], "Span": 0.0 },
+          "FontColor": "#FFFFFFFF",
+          "Style": 1,
+          "StyleColor": "#FFB08A20",
+          "Frame": 0,
+          "Length": 60,
+          "Layer": 4,
+          "Remark": "VF_PROTO_CAPTION_MARISA",
+          "IsLocked": false,
+          "IsHidden": false,
+          "Group": 0
+        },
+        {
+          "$type": "YukkuriMovieMaker.Project.Items.TextItem, YukkuriMovieMaker",
+          "Text": "VideoForge caption prototype (fallback)",
+          "Font": "Meiryo UI",
+          "FontSize": { "Values": [ { "Value": 48.0 } ], "Span": 0.0 },
+          "FontColor": "#FFFFFFFF",
+          "Frame": 0,
+          "Length": 60,
+          "Layer": 5,
+          "Remark": "VF_PROTO_CAPTION",
+          "IsLocked": false,
+          "IsHidden": false,
+          "Group": 0
+        },
+        {
+          "$type": "YukkuriMovieMaker.Project.Items.AudioItem, YukkuriMovieMaker",
+          "FilePath": "C:\\Users\\example\\Videos\\VideoForge\\templates\\ymm4\\proto.wav",
+          "Volume": { "Values": [ { "Value": 100.0 } ], "Span": 0.0 },
+          "PlaybackRate": 100.0,
+          "ContentOffset": "00:00:00",
+          "Frame": 0,
+          "Length": 60,
+          "Layer": 1,
+          "Remark": "VF_PROTO_AUDIO",
+          "IsLocked": false,
+          "IsHidden": false,
+          "Group": 0
+        }
+      ],
+      "VideoInfo": { "FPS": 30, "Hz": 48000, "Width": 1920, "Height": 1080 },
+      "Length": 60,
+      "CurrentFrame": 0,
+      "MaxLayer": 8
+    }
+  ],
+  "Characters": [],
+  "Version": "4.0.0"
+}

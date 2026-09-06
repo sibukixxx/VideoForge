@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/videoforge-project",
+    "crates/videoforge-script",
+    "crates/videoforge-timeline",
+    "crates/videoforge-platform",
+    "crates/videoforge-core",
+    "crates/videoforge-voicevox",
+    "crates/videoforge-preview",
+    "crates/videoforge-export-ymm4",
+    "crates/videoforge-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/sibukixxx/VideoForge"
+rust-version = "1.80"
+
+[workspace.dependencies]
+videoforge-project = { path = "crates/videoforge-project" }
+videoforge-script = { path = "crates/videoforge-script" }
+videoforge-timeline = { path = "crates/videoforge-timeline" }
+videoforge-platform = { path = "crates/videoforge-platform" }
+videoforge-core = { path = "crates/videoforge-core" }
+videoforge-voicevox = { path = "crates/videoforge-voicevox" }
+videoforge-preview = { path = "crates/videoforge-preview" }
+videoforge-export-ymm4 = { path = "crates/videoforge-export-ymm4" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_yaml = "0.9"
+thiserror = "2"
+anyhow = "1"
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "sync", "time", "io-util", "signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sha2 = "0.10"
+hex = "0.4"
+chrono = { version = "0.4", features = ["clock"] }
+dirs = "6"
+clap = { version = "4", features = ["derive"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+walkdir = "2"
+tempfile = "3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

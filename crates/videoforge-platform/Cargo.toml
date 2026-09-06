@@ -1,0 +1,12 @@
+[package]
+name = "videoforge-platform"
+description = "OS adapter (file manager, app dirs, YMM4 detection) for VideoForge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+dirs = { workspace = true }
