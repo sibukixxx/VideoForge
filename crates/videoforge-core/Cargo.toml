@@ -23,6 +23,7 @@ hex = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+fs4 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
