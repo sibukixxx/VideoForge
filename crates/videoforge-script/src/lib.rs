@@ -14,9 +14,22 @@
 //!   full-width colon) starts a new dialogue.
 //! * Following non-empty lines are the dialogue text (joined with `\n`).
 //! * `#` heading lines are comments.
-//! * `@directive ...` lines are reserved for the future DSL; v0.1 records a
-//!   warning and skips them (including everything up to `@end` for block
-//!   directives such as `@human`).
+//! * `@image` / `@character` / `@bgm` / `@se` / `@transition` lines are
+//!   presentation directives (issue #17). They take one argument and the same
+//!   optional `[key=value, ...]` suffix as speaker headers:
+//!
+//!   ```markdown
+//!   @image assets/image/rust.png[role=primary_visual]
+//!   @bgm assets/bgm/main.mp3[volume=0.6]
+//!   @transition fade[duration_ms=300]
+//!   ```
+//!
+//!   Each is kept in [`Script::directives`] with the index of the dialogue
+//!   whose header follows it. The parser only records them; asset existence
+//!   and timeline placement are decided later (validate / timeline).
+//! * Any other `@directive ...` line is reserved: it records a warning and is
+//!   skipped (including everything up to `@end` for block directives such as
+//!   `@human`).
 //! * Text before the first speaker is an error.
 
 use std::collections::BTreeMap;
@@ -75,10 +88,56 @@ pub struct Warning {
     pub message: String,
 }
 
+/// A presentation directive line (`@image …`, `@bgm …`, …).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptDirective {
+    /// 1-based line of the directive.
+    pub line: usize,
+    /// `index` of the dialogue whose header comes next after this line, or
+    /// `None` when no dialogue follows (directive at the end of the script).
+    pub anchor_dialogue_index: Option<usize>,
+    pub kind: DirectiveKind,
+}
+
+/// What a directive asks for. Attributes are kept as written; their meaning
+/// (`role`, `volume`, `duration_ms`, …) is interpreted downstream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DirectiveKind {
+    /// `@image <path>[…]` — a still image.
+    Image {
+        path: String,
+        attributes: BTreeMap<String, String>,
+    },
+    /// `@character <name>[…]` — a character stand-in, by speaker/character name.
+    Character {
+        name: String,
+        attributes: BTreeMap<String, String>,
+    },
+    /// `@bgm <path>[…]` — background music.
+    Bgm {
+        path: String,
+        attributes: BTreeMap<String, String>,
+    },
+    /// `@se <path>[…]` — a sound effect.
+    Se {
+        path: String,
+        attributes: BTreeMap<String, String>,
+    },
+    /// `@transition <name>[…]` — how to move into the next dialogue.
+    Transition {
+        name: String,
+        attributes: BTreeMap<String, String>,
+    },
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Script {
     pub front_matter: FrontMatter,
     pub dialogues: Vec<Dialogue>,
+    /// Presentation directives in script order.
+    #[serde(default)]
+    pub directives: Vec<ScriptDirective>,
     pub warnings: Vec<Warning>,
     #[serde(default)]
     pub source_path: Option<PathBuf>,
@@ -144,6 +203,7 @@ pub fn parse_str(input: &str) -> Result<Script, ScriptError> {
     let (front_matter, body, body_offset) = split_front_matter(input)?;
 
     let mut dialogues: Vec<Dialogue> = Vec::new();
+    let mut directives: Vec<ScriptDirective> = Vec::new();
     let mut warnings: Vec<Warning> = Vec::new();
     let mut current: Option<(Dialogue, Vec<String>)> = None;
     let mut skipping_block: Option<(String, usize)> = None;
@@ -213,6 +273,26 @@ pub fn parse_str(input: &str) -> Result<Script, ScriptError> {
             }
             if BLOCK_DIRECTIVES.contains(&name.as_str()) {
                 skipping_block = Some((name, line_no));
+            } else if let Some(parsed) = parse_directive(&name, rest[name.len()..].trim()) {
+                match parsed {
+                    Ok(kind) => directives.push(ScriptDirective {
+                        line: line_no,
+                        anchor_dialogue_index: None,
+                        kind,
+                    }),
+                    Err(DirectiveParseError::MissingArgument { example }) => {
+                        warnings.push(Warning {
+                            line: line_no,
+                            message: format!(
+                                "directive `@{name}` needs an argument (e.g. `{example}`) and was skipped"
+                            ),
+                        })
+                    }
+                    Err(DirectiveParseError::UnclosedBracket) => warnings.push(Warning {
+                        line: line_no,
+                        message: format!("directive `@{name}` has an unclosed `[` and was skipped"),
+                    }),
+                }
             } else {
                 warnings.push(Warning {
                     line: line_no,
@@ -260,15 +340,64 @@ pub fn parse_str(input: &str) -> Result<Script, ScriptError> {
         return Err(ScriptError::NoDialogue);
     }
 
+    for directive in &mut directives {
+        directive.anchor_dialogue_index = dialogues
+            .iter()
+            .find(|d| d.line > directive.line)
+            .map(|d| d.index);
+    }
+
     Ok(Script {
         front_matter,
         dialogues,
+        directives,
         warnings,
         source_path: None,
     })
 }
 
 const BLOCK_DIRECTIVES: &[&str] = &["human"];
+
+enum DirectiveParseError {
+    MissingArgument { example: &'static str },
+    UnclosedBracket,
+}
+
+/// Parse a structured directive. `None` when `name` is not one of the five
+/// structured directives; `argument` is the line after the name, e.g.
+/// `assets/image/x.png[role=primary_visual]`.
+fn parse_directive(
+    name: &str,
+    argument: &str,
+) -> Option<Result<DirectiveKind, DirectiveParseError>> {
+    type Build = fn(String, BTreeMap<String, String>) -> DirectiveKind;
+    let (example, build): (&'static str, Build) = match name {
+        "image" => ("@image assets/image/x.png", |path, attributes| {
+            DirectiveKind::Image { path, attributes }
+        }),
+        "character" => ("@character reimu", |name, attributes| {
+            DirectiveKind::Character { name, attributes }
+        }),
+        "bgm" => ("@bgm assets/bgm/x.mp3", |path, attributes| {
+            DirectiveKind::Bgm { path, attributes }
+        }),
+        "se" => ("@se assets/se/x.wav", |path, attributes| {
+            DirectiveKind::Se { path, attributes }
+        }),
+        "transition" => ("@transition fade", |name, attributes| {
+            DirectiveKind::Transition { name, attributes }
+        }),
+        _ => return None,
+    };
+    let Some((head, attributes)) = split_attribute_suffix(argument) else {
+        return Some(Err(DirectiveParseError::UnclosedBracket));
+    };
+    let head = head.trim().trim_matches('"').to_string();
+    if head.is_empty() {
+        return Some(Err(DirectiveParseError::MissingArgument { example }));
+    }
+    Some(Ok(build(head, attributes)))
+}
 
 /// Split off a leading `---\n...\n---` block. Returns (front matter, body,
 /// number of lines consumed before the body).
@@ -438,13 +567,150 @@ mod tests {
 
     #[test]
     fn unknown_directives_warn_and_are_skipped() {
-        let src = "霊夢:\nこんにちは。\n\n@pause 500ms\n\n@image src=\"assets/image/chart.png\"\n\n@human id=\"x\"\nここに本人の経験\n@end\n\n魔理沙:\nやあ。\n";
+        let src = "霊夢:\nこんにちは。\n\n@pause 500ms\n\n@camera zoom\n\n@human id=\"x\"\nここに本人の経験\n@end\n\n魔理沙:\nやあ。\n";
         let s = parse_str(src).unwrap();
         assert_eq!(s.dialogues.len(), 2);
         assert_eq!(s.warnings.len(), 3);
         assert!(s.warnings[0].message.contains("@pause"));
         assert!(s.warnings[2].message.contains("@human"));
         assert_eq!(s.dialogues[0].text, "こんにちは。");
+    }
+
+    fn attrs(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn image_directive_is_parsed_with_path_and_attributes() {
+        let s = parse_str(
+            "@image assets/image/rust.png[role=primary_visual, duration_ms=3000]\n霊夢:\nやあ\n",
+        )
+        .unwrap();
+        assert_eq!(
+            s.directives,
+            vec![ScriptDirective {
+                line: 1,
+                anchor_dialogue_index: Some(1),
+                kind: DirectiveKind::Image {
+                    path: "assets/image/rust.png".into(),
+                    attributes: attrs(&[("role", "primary_visual"), ("duration_ms", "3000")]),
+                },
+            }]
+        );
+        assert!(s.warnings.is_empty(), "{:?}", s.warnings);
+    }
+
+    #[test]
+    fn every_directive_kind_is_recognized() {
+        let src = "@character reimu[expression=happy]\n@bgm assets/bgm/main.mp3[volume=0.6]\n@se assets/se/pop.wav\n@transition fade[duration_ms=300]\n霊夢:\nやあ\n";
+        let s = parse_str(src).unwrap();
+        let kinds: Vec<&DirectiveKind> = s.directives.iter().map(|d| &d.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                &DirectiveKind::Character {
+                    name: "reimu".into(),
+                    attributes: attrs(&[("expression", "happy")]),
+                },
+                &DirectiveKind::Bgm {
+                    path: "assets/bgm/main.mp3".into(),
+                    attributes: attrs(&[("volume", "0.6")]),
+                },
+                &DirectiveKind::Se {
+                    path: "assets/se/pop.wav".into(),
+                    attributes: BTreeMap::new(),
+                },
+                &DirectiveKind::Transition {
+                    name: "fade".into(),
+                    attributes: attrs(&[("duration_ms", "300")]),
+                },
+            ]
+        );
+        assert!(s.warnings.is_empty(), "{:?}", s.warnings);
+    }
+
+    #[test]
+    fn directives_anchor_to_the_next_dialogue_header() {
+        // A directive after dialogue 1's text (before the blank line) still
+        // anchors to dialogue 2: the anchor is the next *header* below it.
+        let src = "@bgm assets/bgm/a.mp3\n霊夢:\nこんにちは。\n@image assets/image/a.png\n\n魔理沙:\nやあ。\n\n@se assets/se/pop.wav\n\n霊夢:\nおわり。\n";
+        let s = parse_str(src).unwrap();
+        let anchors: Vec<(usize, Option<usize>)> = s
+            .directives
+            .iter()
+            .map(|d| (d.line, d.anchor_dialogue_index))
+            .collect();
+        assert_eq!(anchors, vec![(1, Some(1)), (4, Some(2)), (9, Some(3))]);
+        assert_eq!(s.dialogues[0].text, "こんにちは。");
+    }
+
+    #[test]
+    fn trailing_directive_has_no_anchor() {
+        let s = parse_str("霊夢:\nやあ\n\n@transition fade\n").unwrap();
+        assert_eq!(s.directives.len(), 1);
+        assert_eq!(s.directives[0].anchor_dialogue_index, None);
+    }
+
+    #[test]
+    fn directive_without_argument_warns_and_is_skipped() {
+        let s = parse_str("@image\n@bgm   [volume=1]\n霊夢:\nやあ\n").unwrap();
+        assert!(s.directives.is_empty(), "{:?}", s.directives);
+        let messages: Vec<&str> = s.warnings.iter().map(|w| w.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            vec![
+                "directive `@image` needs an argument (e.g. `@image assets/image/x.png`) and was skipped",
+                "directive `@bgm` needs an argument (e.g. `@bgm assets/bgm/x.mp3`) and was skipped",
+            ]
+        );
+        assert_eq!(s.warnings[0].line, 1);
+        assert_eq!(s.warnings[1].line, 2);
+    }
+
+    #[test]
+    fn directive_with_unbalanced_brackets_warns_and_is_skipped() {
+        let s = parse_str("@image assets/image/a.png[role=x\n霊夢:\nやあ\n").unwrap();
+        assert!(s.directives.is_empty());
+        assert_eq!(
+            s.warnings[0].message,
+            "directive `@image` has an unclosed `[` and was skipped"
+        );
+    }
+
+    #[test]
+    fn unknown_directive_still_warns_and_parsing_succeeds() {
+        let s = parse_str("霊夢:\nやあ\n\n@pause 500ms\n\n魔理沙:\nやあ。\n").unwrap();
+        assert!(s.directives.is_empty());
+        assert_eq!(s.dialogues.len(), 2);
+        assert_eq!(
+            s.warnings,
+            vec![Warning {
+                line: 4,
+                message: "directive `@pause` is not supported in v0.1 and was skipped".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn human_block_is_still_skipped_around_directives() {
+        let src = "霊夢:\nこんにちは。\n\n@human id=\"x\"\n@image assets/image/inside.png\nここに本人の経験\n@end\n\n@image assets/image/after.png\n魔理沙:\nやあ。\n";
+        let s = parse_str(src).unwrap();
+        assert_eq!(s.dialogues.len(), 2);
+        assert_eq!(s.dialogues[0].text, "こんにちは。");
+        assert_eq!(
+            s.directives.len(),
+            1,
+            "directive inside @human must be skipped"
+        );
+        assert!(matches!(
+            &s.directives[0].kind,
+            DirectiveKind::Image { path, .. } if path == "assets/image/after.png"
+        ));
+        assert_eq!(s.warnings.len(), 1);
+        assert!(s.warnings[0].message.contains("@human"));
     }
 
     #[test]

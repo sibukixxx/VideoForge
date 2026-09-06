@@ -504,6 +504,35 @@ Text
 # これはMarkdown見出しとして扱う
 ```
 
+## 演出 directive（P3-03, issue #17）
+
+話者ヘッダと同じ `[key=value, ...]` 属性構文で、素材と演出を 1 行ずつ指定する。
+
+```markdown
+@bgm assets/bgm/main.mp3[volume=0.6]
+
+@image assets/image/chart.png[role=primary_visual, duration_ms=3000]
+霊夢:
+このグラフを見てください。
+
+@character reimu[expression=happy]
+@transition fade[duration_ms=300]
+魔理沙:
+なるほどな。
+```
+
+| directive | 引数 | 意味 |
+|---|---|---|
+| `@image <path>` | asset path | 静止画 |
+| `@character <name>` | 話者/キャラ名 | 立ち絵 |
+| `@bgm <path>` | asset path | BGM |
+| `@se <path>` | asset path | 効果音 |
+| `@transition <name>` | `fade` 等 | 次の dialogue への移り方 |
+
+parser は `Script.directives` に「行番号・直後に来る dialogue の index・種類と属性」を
+残すだけで、asset の存在確認とタイムライン配置は validate / timeline の責務（P3-04）。
+引数が無い・`[` が閉じていない行は warning にして読み飛ばす。
+
 ## 将来の拡張
 
 ```markdown
@@ -511,8 +540,6 @@ Text
 これはかなりヤバいぜ。
 
 @pause 500ms
-
-@image src="assets/image/chart.png"
 
 @human id="personal-experience"
 ここに本人の経験を書く
