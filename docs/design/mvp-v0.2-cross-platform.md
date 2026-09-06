@@ -504,6 +504,35 @@ Text
 # これはMarkdown見出しとして扱う
 ```
 
+## 演出 directive（P3-03, issue #17）
+
+話者ヘッダと同じ `[key=value, ...]` 属性構文で、素材と演出を 1 行ずつ指定する。
+
+```markdown
+@bgm assets/bgm/main.mp3[volume=0.6]
+
+@image assets/image/chart.png[role=primary_visual, duration_ms=3000]
+霊夢:
+このグラフを見てください。
+
+@character reimu[expression=happy]
+@transition fade[duration_ms=300]
+魔理沙:
+なるほどな。
+```
+
+| directive | 引数 | 意味 |
+|---|---|---|
+| `@image <path>` | asset path | 静止画 |
+| `@character <name>` | 話者/キャラ名 | 立ち絵 |
+| `@bgm <path>` | asset path | BGM |
+| `@se <path>` | asset path | 効果音 |
+| `@transition <name>` | `fade` 等 | 次の dialogue への移り方 |
+
+parser は `Script.directives` に「行番号・直後に来る dialogue の index・種類と属性」を
+残すだけで、asset の存在確認とタイムライン配置は validate / timeline の責務（P3-04）。
+引数が無い・`[` が閉じていない行は warning にして読み飛ばす。
+
 ## 将来の拡張
 
 ```markdown
@@ -511,8 +540,6 @@ Text
 これはかなりヤバいぜ。
 
 @pause 500ms
-
-@image src="assets/image/chart.png"
 
 @human id="personal-experience"
 ここに本人の経験を書く
@@ -625,6 +652,7 @@ pub enum TrackKind {
     Image,
     Background,
     SoundEffect,
+    Bgm,
 }
 ```
 
@@ -671,6 +699,94 @@ Exporterでframeへ変換する。
 - FPS変更に強い
 - 音声実尺との対応が容易
 - FCPXML等への将来展開が容易
+
+---
+
+## 11.5 Visual / Media Clip（P3-01, issue #15）
+
+音声+字幕以外の素材をタイムラインに載せるための clip。
+`Clip` は `type` タグ付き enum で、`audio` / `caption` / `background` に加えて
+`image` / `character` / `bgm` / `sound_effect` を持つ。
+
+```rust
+pub struct ImageClip {
+    pub id: String,
+    pub source: RelativeAssetPath,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    pub transform: Transform,
+}
+
+pub struct CharacterClip {
+    pub id: String,
+    pub source: RelativeAssetPath,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    pub speaker: Option<String>,   // canonical speaker key
+    pub transform: Transform,
+}
+
+pub struct BgmClip {
+    pub id: String,
+    pub source: RelativeAssetPath,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    pub volume: f32,               // linear gain, 1.0 = as authored
+    pub looping: bool,
+}
+
+pub struct SoundEffectClip {
+    pub id: String,
+    pub source: RelativeAssetPath,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    pub volume: f32,
+}
+```
+
+`Transform` は **静的な値だけ** を持つ。キーフレーム・イージング・時間変化する値は持たない。
+時間変化する演出は presentation intent（P3-02）として clip に付け、補間は renderer 側の責務にする。
+
+```rust
+pub struct Transform {
+    pub x: f32,             // clip の中心。0.0 = 左端, 1.0 = 右端
+    pub y: f32,             // clip の中心。0.0 = 上端, 1.0 = 下端
+    pub scale: f32,         // fit 後のサイズに掛ける倍率。1.0 = そのまま
+    pub rotation_deg: f32,  // 中心まわり時計回り
+    pub opacity: f32,       // 0.0 (透明) … 1.0 (不透明)
+    pub layer: i32,         // z-order。大きいほど手前
+    pub fit: FitMode,       // Contain / Cover / Stretch / None
+}
+```
+
+座標系はフレームに対する正規化座標で、After Effects の anchor point や
+DaVinci Resolve のノードなど特定 NLE の概念は持ち込まない。
+`transform` と `volume` は JSON で省略可能（省略時は中央・等倍・不透明・layer 0 / gain 1.0）。
+
+追加は既存ファイルに対して加算的なので `schema_version` は上げない。
+
+---
+
+## 11.6 Presentation（P3-02, issue #16）
+
+Image / Character clip は「何のために出すか」「どう見せたいか」を、具体的な
+`Transform` とは別に持てる。
+
+```rust
+pub struct Presentation {
+    pub role: Option<String>,             // primary_visual / supporting_visual / diagram /
+                                          // character / background / callout / comparison / emphasis
+    pub intent: Option<String>,           // fade / slide / zoom / emphasis / cut
+    pub intent_duration_ms: Option<u64>,  // intent の遷移時間。renderer が解釈
+}
+```
+
+閉じた enum ではなく自由記述の `String`。推奨語彙は `videoforge_project::KNOWN_ROLES` /
+`KNOWN_INTENTS` に置き、`videoforge validate` は directive の `role=` / `intent=` が
+語彙外なら **warning**（error ではない）を出す。未知 directive を warning で許容する
+方針と同じで、typo の検出だけを助ける。
+
+`presentation` は省略可（`None`）。fade / slide の実装や role の自動推論は含まない。
 
 ---
 
@@ -827,6 +943,32 @@ fn millis_to_frame(ms: u64, fps: u32) -> u32 {
     ((ms as f64 * fps as f64) / 1000.0).round() as u32
 }
 ```
+
+## 17.1 演出 directive の配置（P3-04, issue #18）
+
+`schedule()` の結果（dialogue の start/end）を **消費するだけ** で、dialogue の
+スケジューリング自体は変えない。
+
+- 各 directive は「直後の dialogue」の `start_ms` から始まる
+- 長さは属性 `duration_ms` があればそれ。無ければ
+  - `@image`: 次の `@image` が始まるまで、無ければタイムライン終端まで
+  - `@character`: 同じ話者の次の `@character` まで、無ければ終端まで
+  - `@bgm`: 次の `@bgm` まで、無ければ終端まで
+  - `@se`: 1000ms（`DEFAULT_SOUND_EFFECT_MS`）
+- どの clip も最後の dialogue の終端を超えない（超える指定は切り詰める）
+- `@transition <name>[duration_ms=N]` は同じ dialogue に付いた image / character の
+  `presentation.intent` / `intent_duration_ms` になる。相手が居なければ warning
+- track は `image` / `character` / `bgm` / `se` を clip がある分だけ、audio / caption の後ろに追加
+
+asset の解決は `videoforge-core::directives`（validate と generate で共用）:
+
+- path は `RelativeAssetPath` + `Workspace::resolve` で検証し、Workspace 外へ出る指定は **error**
+- asset が無い・属性が未知・数値が不正・末尾で dialogue が続かない → **warning** にして
+  その clip / 属性だけ読み飛ばす（generate は失敗しない）
+- `@character <name>[expression=e]` は `assets/character/<speaker key>/<e>.png`
+  （`src=` で上書き可、`e` の既定は `default`）。`<name>` が話者/alias なら
+  `CharacterClip.speaker` にその key が入る
+- 存在する asset は Workspace と同じ相対パスで `generated/<slug>/` へコピーする
 
 ---
 

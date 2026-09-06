@@ -9,6 +9,7 @@
 
 pub mod capabilities;
 pub mod config;
+pub mod directives;
 pub mod doctor;
 pub mod error;
 pub mod export;

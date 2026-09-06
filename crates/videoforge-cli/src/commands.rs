@@ -217,6 +217,13 @@ pub fn validate(ctx: &Context, script: PathBuf) -> anyhow::Result<ExitCode> {
                     }
                 );
             }
+            if !report.directives.is_empty() {
+                println!(
+                    "Directives: {} ({} with a missing asset)",
+                    report.directives.len(),
+                    report.directives.iter().filter(|d| !d.exists).count()
+                );
+            }
         }
         print_issues("warning", &report.warnings);
         print_issues("error", &report.errors);

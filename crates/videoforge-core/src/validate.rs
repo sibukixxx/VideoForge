@@ -6,6 +6,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use videoforge_script::{Script, ScriptError};
 
+use crate::directives::{resolve_directives, ResolvedDirective};
+
 use crate::config::{Config, VoiceParams};
 use crate::error::AppError;
 use crate::workspace::Workspace;
@@ -17,7 +19,7 @@ pub struct ValidationIssue {
 }
 
 impl ValidationIssue {
-    fn new(line: Option<usize>, message: impl Into<String>) -> Self {
+    pub fn new(line: Option<usize>, message: impl Into<String>) -> Self {
         Self {
             line,
             message: message.into(),
@@ -47,6 +49,9 @@ pub struct ValidationReport {
     pub errors: Vec<ValidationIssue>,
     pub warnings: Vec<ValidationIssue>,
     pub dialogues: Vec<ResolvedDialogue>,
+    /// Presentation directives with their assets checked (issue #18).
+    #[serde(default)]
+    pub directives: Vec<ResolvedDirective>,
     pub total_chars: usize,
 }
 
@@ -143,6 +148,11 @@ pub fn validate_script(
         }
     }
 
+    let resolution = resolve_directives(script, config, workspace);
+    report.errors.extend(resolution.errors);
+    report.warnings.extend(resolution.warnings);
+    report.directives = resolution.directives;
+
     if let Some(bg) = &config.preview.background {
         if config.preview.enabled {
             match workspace.resolve(bg) {
@@ -218,6 +228,37 @@ mod tests {
         assert_eq!(report.errors[0].line, Some(4));
         assert!(report.errors[0].message.contains("アリス"));
         assert!(report.into_result().is_err());
+    }
+
+    #[test]
+    fn unknown_presentation_vocabulary_on_directives_is_a_warning_not_an_error() {
+        let (_d, ws, cfg) = workspace();
+        let path = ws.scripts_dir().join("visual.md");
+        std::fs::write(
+            &path,
+            "@image assets/image/a.png[role=hero, intent=wobble]\n@character reimu[role=character, intent=fade]\n@bgm assets/bgm/a.mp3[role=hero]\n霊夢:\nやあ\n",
+        )
+        .unwrap();
+        let report = validate_file(&ws, &cfg, &path);
+        assert!(report.is_ok(), "{:?}", report.errors);
+        let vocabulary: Vec<&ValidationIssue> = report
+            .warnings
+            .iter()
+            .filter(|w| w.message.contains("recommended"))
+            .collect();
+        assert_eq!(
+            vocabulary,
+            vec![
+                &ValidationIssue::new(
+                    Some(1),
+                    "`role=hero` on `@image` is not a recommended role (known: primary_visual, supporting_visual, diagram, character, background, callout, comparison, emphasis); it is kept as written"
+                ),
+                &ValidationIssue::new(
+                    Some(1),
+                    "`intent=wobble` on `@image` is not a recommended intent (known: fade, slide, zoom, emphasis, cut); it is kept as written"
+                ),
+            ]
+        );
     }
 
     #[test]

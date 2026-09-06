@@ -12,12 +12,15 @@
 //! * Unknown fields are preserved so that future schema additions round-trip.
 
 pub mod path;
+pub mod presentation;
 pub mod project;
 pub mod time;
 
 pub use path::{PathError, RelativeAssetPath};
+pub use presentation::{Presentation, KNOWN_INTENTS, KNOWN_ROLES};
 pub use project::{
-    AudioClip, BackgroundClip, CaptionClip, Clip, ProjectError, SourceInfo, Track, TrackKind,
-    VideoProject, VideoSettings, SCHEMA_VERSION,
+    AudioClip, BackgroundClip, BgmClip, CaptionClip, CharacterClip, Clip, FitMode, ImageClip,
+    ProjectError, SoundEffectClip, SourceInfo, Track, TrackKind, Transform, VideoProject,
+    VideoSettings, SCHEMA_VERSION,
 };
 pub use time::{format_srt_timestamp, format_timespan, frame_to_millis, millis_to_frame};
