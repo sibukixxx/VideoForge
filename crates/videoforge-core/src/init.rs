@@ -76,6 +76,16 @@ title: 動画タイトル
 - `#` で始まる行は見出し（コメント扱い）
 - `@pause` などの directive は v0.1 では未対応（warning になる）
 
+## トレンドから台本を作るとき
+
+VideoForge 本体はトレンド取得や文章生成を行わない（LLM を呼ばない）。ネタ探しと台本執筆は
+エージェント（あなた）の仕事で、成果物として上記フォーマットの Markdown を書く。
+
+1. トレンド元（ニュース RSS、話題のトピックなど）から動画にするネタを1つ選ぶ
+2. 要点を上記フォーマットの台本に落とし込む。話者はサンプルの 霊夢/魔理沙 に限らず、
+   `videoforge.yaml` の `speakers` に登録されているものを自由に使ってよい
+3. `scripts/<slug>.md` として保存し、通常の生成手順（validate → generate）に進む
+
 ## 環境確認
 
 ```bash
@@ -217,5 +227,12 @@ mod tests {
 
         // second init refuses
         assert!(init(&root, None).is_err());
+    }
+
+    #[test]
+    fn agents_md_includes_trend_to_script_guidance() {
+        let content = agents_md("demo");
+        assert!(content.contains("トレンドから台本を作るとき"));
+        assert!(content.contains("videoforge.yaml"));
     }
 }
