@@ -1,0 +1,40 @@
+[package]
+name = "videoforge-desktop"
+description = "VideoForge desktop app (Tauri v2 + React) — a thin GUI over videoforge-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/sibukixxx/VideoForge"
+rust-version = "1.80"
+
+# Deliberately its own workspace: `tauri` needs WebKitGTK/GTK development
+# packages on Linux, and pulling it into the root workspace would make the
+# offline `cargo test --workspace` depend on them. The root Cargo.toml lists
+# this directory under `exclude`.
+[workspace]
+
+[lib]
+name = "videoforge_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+videoforge-core = { path = "../../../crates/videoforge-core" }
+videoforge-voicevox = { path = "../../../crates/videoforge-voicevox" }
+videoforge-preview = { path = "../../../crates/videoforge-preview" }
+videoforge-export-ymm4 = { path = "../../../crates/videoforge-export-ymm4" }
+videoforge-platform = { path = "../../../crates/videoforge-platform" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[dev-dependencies]
+tempfile = "3"

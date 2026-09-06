@@ -11,6 +11,10 @@ members = [
     "crates/videoforge-export-ymm4",
     "crates/videoforge-cli",
 ]
+# The desktop app is its own cargo workspace (apps/desktop/src-tauri/Cargo.toml):
+# `tauri` needs WebKitGTK/GTK on Linux and would drag that into the offline
+# `cargo test --workspace`. Build it with `pnpm tauri build` from apps/desktop.
+exclude = ["apps/desktop/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

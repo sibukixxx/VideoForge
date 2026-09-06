@@ -25,7 +25,9 @@ cargo run -p videoforge-cli -- generate scripts/sample.md --fake-tts --no-previe
 ```
 
 CI (`docs/ci/github-actions-ci.yml`, not yet under `.github/workflows/`) runs fmt → clippy →
-test → release build → an offline smoke run of `init → validate → generate → bundle → export`.
+test → release build → an offline smoke run of `init → validate → generate → bundle → export`, with
+FFmpeg installed so the real-FFmpeg tests execute, plus a separate desktop job (pnpm build + cargo
+check/test of the Tauri crate).
 
 ### Working without VOICEVOX / FFmpeg
 
@@ -57,10 +59,18 @@ Four trait seams, all defined in core, all implemented in leaf crates:
 | `ProjectExporter` | `core/src/export.rs` | `videoforge-export-ymm4` |
 | `Platform` | `videoforge-platform` | per-OS impls in that crate |
 
-`crates/videoforge-cli/src/commands.rs` is the composition root: it is the only place that picks
-concrete implementations (`make_tts` → `VoicevoxEngine` or `FakeTtsEngine`, `FfmpegPreviewRenderer::detect`,
-`Ymm4Exporter`, `TtsCache` rooted at the platform cache dir). A new engine or exporter means a new
-crate implementing the trait plus wiring here — core stays untouched.
+There are two composition roots, and they are the only places that pick concrete implementations
+(`make_tts` → `VoicevoxEngine` or `FakeTtsEngine`, `FfmpegPreviewRenderer::detect`, `Ymm4Exporter`,
+`TtsCache` rooted at the platform cache dir): `crates/videoforge-cli/src/commands.rs` and
+`apps/desktop/src-tauri/src/commands.rs` (Tauri). A new engine or exporter means a new crate
+implementing the trait plus wiring in both — core stays untouched. Behaviour the GUI needs goes into
+core, never into the Tauri crate.
+
+`apps/desktop/src-tauri` is **not** a member of the root cargo workspace (`exclude` in `Cargo.toml`):
+`tauri` needs WebKitGTK on Linux, and the root `cargo test --workspace` must stay runnable without it.
+Check it separately with `cd apps/desktop/src-tauri && cargo clippy --all-targets -- -D warnings && cargo test`;
+the frontend with `cd apps/desktop && pnpm install && pnpm build`. The GUI reports failures as
+`{ code, message }` where `code` is `AppError::code()`.
 
 ### Generation pipeline
 
@@ -109,8 +119,17 @@ These span files and are easy to break silently:
   `tts.allow_remote_endpoint: true` is the opt-in.
 - **Writes that would destroy user data ask first.** `bundle ymm4` refuses an existing output
   directory unless `--force`, and even then only when it looks like a VideoForge bundle.
-- **TTS cache** is SHA256(engine, speaker_id, text, speed, pitch, intonation, volume) under the OS
-  cache dir, never inside the workspace. Any change to the key invalidates every cached WAV.
+- **TTS cache** is SHA256(schema, engine, engine *version*, speaker_id, text, speed, pitch,
+  intonation, volume) under `<OS cache dir>/tts/v<CACHE_SCHEMA_VERSION>/`, never inside the
+  workspace. The version comes from `TtsEngine::health()` via `tts::bind_cache`; if that fails the run
+  proceeds **without** the cache and records a `TTS cache disabled` warning in the manifest — never
+  fall back to a version-less key. Changing the hashed inputs means bumping `CACHE_SCHEMA_VERSION`,
+  which also moves entries to a new directory so old and new keys cannot collide.
+- **Filtergraph values are escaped twice** (`videoforge_preview::quote_filter_value`): option-pass
+  escaping (`\`, `'`, `:`, edge whitespace) and then graph-pass quoting. Quoting alone silently
+  drops `'` and `:`. Paths inside the graph stay relative to the project dir; only `preview.font`
+  is absolute. `crates/videoforge-preview/tests/ffmpeg_real.rs` checks this against a real FFmpeg
+  when one is on `PATH` (or `VIDEOFORGE_FFMPEG`) and skips otherwise.
 - **YMM4 export is a template patch, not a serializer.** The template `.ymmp` is an opaque
   `serde_json::Value`; the exporter clones items whose `Remark` starts with `VF_PROTO_` and writes
   only `Text` / `Frame` / `Length` / `FilePath` / `Remark` / `IsHidden`. Everything else is
@@ -128,4 +147,5 @@ These span files and are easy to break silently:
   ("No such filter: 'drawtext'") after the TTS work is already done.
 - The CI workflow is parked in `docs/ci/` because the authoring session could not create files
   under `.github/workflows/`. Enabling it is a `git mv` (see `docs/ci/README.md`).
-- Tauri GUI (design Phase 7) is unstarted.
+- The Tauri GUI (`apps/desktop`) builds and its command layer is unit-tested, but it has not been
+  launched on a real Windows or macOS desktop; the checklist is in `apps/desktop/README.md`.
