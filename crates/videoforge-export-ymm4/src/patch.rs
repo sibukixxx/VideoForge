@@ -46,12 +46,23 @@ pub fn patch_template(
     };
     let mut warnings = Vec::new();
 
-    let items_ptr = find_prototype_array(&template, "").ok_or_else(|| {
-        AppError::TemplatePrototypeMissing(format!(
-            "no timeline item with a `{REMARK}` starting with `{PROTO_PREFIX}` found in {}",
-            template_path.display()
-        ))
-    })?;
+    let mut containers = Vec::new();
+    collect_prototype_arrays(&template, "", &mut containers);
+    let items_ptr = match containers.as_slice() {
+        [] => {
+            return Err(AppError::TemplatePrototypeMissing(format!(
+                "no timeline item with a `{REMARK}` starting with `{PROTO_PREFIX}` found in {}",
+                template_path.display()
+            )))
+        }
+        [only] => only.clone(),
+        _ => {
+            return Err(AppError::TemplatePrototypeAmbiguous {
+                path: template_path.to_path_buf(),
+                candidates: containers,
+            })
+        }
+    };
 
     // fps: the template's timeline VideoInfo wins because YMM4 plays at it.
     let timeline_ptr = parent_pointer(&items_ptr);
@@ -222,26 +233,32 @@ fn set_if_present<V: Into<Value>>(item: &mut Value, key: &str, value: V) {
     }
 }
 
-/// Depth-first search for an array containing at least one object whose
-/// `Remark` starts with the prototype prefix. Returns its JSON pointer.
-fn find_prototype_array(value: &Value, pointer: &str) -> Option<String> {
+/// Collect the JSON pointer of *every* array holding at least one object whose
+/// `Remark` starts with the prototype prefix.
+///
+/// The search never stops at the first hit: patching the container that
+/// happened to be found first would silently rewrite the wrong timeline when a
+/// template has prototypes in more than one place. The caller turns two or more
+/// candidates into an error.
+fn collect_prototype_arrays(value: &Value, pointer: &str, out: &mut Vec<String>) {
     match value {
         Value::Array(items) => {
             if items
                 .iter()
                 .any(|i| remark_of(i).is_some_and(|r| r.starts_with(PROTO_PREFIX)))
             {
-                return Some(pointer.to_string());
+                out.push(pointer.to_string());
             }
-            items
-                .iter()
-                .enumerate()
-                .find_map(|(i, v)| find_prototype_array(v, &format!("{pointer}/{i}")))
+            for (i, v) in items.iter().enumerate() {
+                collect_prototype_arrays(v, &format!("{pointer}/{i}"), out);
+            }
         }
-        Value::Object(map) => map.iter().find_map(|(k, v)| {
-            find_prototype_array(v, &format!("{pointer}/{}", escape_pointer(k)))
-        }),
-        _ => None,
+        Value::Object(map) => {
+            for (k, v) in map {
+                collect_prototype_arrays(v, &format!("{pointer}/{}", escape_pointer(k)), out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -438,6 +455,44 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, AppError::TemplatePrototypeMissing(_)));
+    }
+
+    #[test]
+    fn a_second_prototype_container_is_an_error_not_a_coin_flip() {
+        let mut t = template();
+        let second_timeline = t["Timelines"][0].clone();
+        t["Timelines"].as_array_mut().unwrap().push(second_timeline);
+
+        let err =
+            patch_template(t, &project(), Path::new("t.ymmp"), &materialize, None).unwrap_err();
+
+        let AppError::TemplatePrototypeAmbiguous { path, candidates } = err else {
+            panic!("expected TemplatePrototypeAmbiguous, got {err:?}");
+        };
+        assert_eq!(path, Path::new("t.ymmp"));
+        assert_eq!(
+            candidates,
+            vec!["/Timelines/0/Items", "/Timelines/1/Items"],
+            "both containers must be reported, in document order"
+        );
+    }
+
+    #[test]
+    fn prototypes_nested_below_the_timeline_are_also_reported() {
+        // A prototype accidentally left inside a group/effect list is a second
+        // container even though it is not a sibling of the first.
+        let mut t = template();
+        t["Timelines"][0]["Items"].as_array_mut().unwrap()[0]["Effects"] =
+            json!([{"Remark": "VF_PROTO_AUDIO"}]);
+
+        let err =
+            patch_template(t, &project(), Path::new("t.ymmp"), &materialize, None).unwrap_err();
+
+        assert!(
+            matches!(err, AppError::TemplatePrototypeAmbiguous { ref candidates, .. }
+                if candidates == &["/Timelines/0/Items", "/Timelines/0/Items/0/Effects"]),
+            "got {err:?}"
+        );
     }
 
     #[test]
