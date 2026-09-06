@@ -93,6 +93,8 @@ pub enum TrackKind {
     Image,
     Background,
     SoundEffect,
+    /// Background music. Long, usually looping, laid under the whole timeline.
+    Bgm,
 }
 
 /// A clip on a track. Tagged by `type` so exporters can dispatch on it.
@@ -102,6 +104,10 @@ pub enum Clip {
     Audio(AudioClip),
     Caption(CaptionClip),
     Background(BackgroundClip),
+    Image(ImageClip),
+    Character(CharacterClip),
+    Bgm(BgmClip),
+    SoundEffect(SoundEffectClip),
 }
 
 impl Clip {
@@ -110,6 +116,10 @@ impl Clip {
             Clip::Audio(c) => &c.id,
             Clip::Caption(c) => &c.id,
             Clip::Background(c) => &c.id,
+            Clip::Image(c) => &c.id,
+            Clip::Character(c) => &c.id,
+            Clip::Bgm(c) => &c.id,
+            Clip::SoundEffect(c) => &c.id,
         }
     }
 
@@ -118,6 +128,10 @@ impl Clip {
             Clip::Audio(c) => c.start_ms,
             Clip::Caption(c) => c.start_ms,
             Clip::Background(c) => c.start_ms,
+            Clip::Image(c) => c.start_ms,
+            Clip::Character(c) => c.start_ms,
+            Clip::Bgm(c) => c.start_ms,
+            Clip::SoundEffect(c) => c.start_ms,
         }
     }
 
@@ -126,6 +140,10 @@ impl Clip {
             Clip::Audio(c) => c.duration_ms,
             Clip::Caption(c) => c.duration_ms,
             Clip::Background(c) => c.duration_ms,
+            Clip::Image(c) => c.duration_ms,
+            Clip::Character(c) => c.duration_ms,
+            Clip::Bgm(c) => c.duration_ms,
+            Clip::SoundEffect(c) => c.duration_ms,
         }
     }
 
@@ -139,6 +157,10 @@ impl Clip {
             Clip::Audio(c) => Some(&c.source),
             Clip::Caption(_) => None,
             Clip::Background(c) => Some(&c.source),
+            Clip::Image(c) => Some(&c.source),
+            Clip::Character(c) => Some(&c.source),
+            Clip::Bgm(c) => Some(&c.source),
+            Clip::SoundEffect(c) => Some(&c.source),
         }
     }
 }
@@ -178,6 +200,128 @@ pub struct BackgroundClip {
     pub duration_ms: u64,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// How a visual clip is fitted into the video frame before `Transform::scale`
+/// is applied. Closed set on purpose: exporters must be able to map every
+/// value, and renderer-specific modes belong in `extra`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FitMode {
+    /// Scale uniformly so the whole image is visible inside the frame.
+    #[default]
+    Contain,
+    /// Scale uniformly so the image fills the frame, cropping the overflow.
+    Cover,
+    /// Scale non-uniformly to exactly the frame size.
+    Stretch,
+    /// Keep the image's native pixel size.
+    None,
+}
+
+/// Static placement of a visual clip (image, character) in the frame.
+///
+/// Coordinate system, independent of any NLE:
+/// * `x`, `y` are the clip's **centre**, normalized to the frame:
+///   `0.0` = left/top edge, `1.0` = right/bottom edge, `0.5, 0.5` = frame centre.
+/// * `scale` multiplies the size produced by `fit` (`1.0` = unchanged).
+/// * `rotation_deg` is clockwise around the centre.
+/// * `opacity` is `0.0` (invisible) … `1.0` (opaque).
+/// * `layer` is the z-order; a larger value is drawn in front.
+///
+/// Every field is a plain value: no keyframes, easing or anything that varies
+/// over time. Time-dependent presentation (fade, slide, …) is expressed as
+/// intent on the clip and interpolated by the renderer, so this struct never
+/// has to grow a per-tool animation model.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Transform {
+    pub x: f32,
+    pub y: f32,
+    pub scale: f32,
+    pub rotation_deg: f32,
+    pub opacity: f32,
+    pub layer: i32,
+    pub fit: FitMode,
+}
+
+impl Default for Transform {
+    /// Centred, fitted, fully opaque, unrotated, on layer 0.
+    fn default() -> Self {
+        Self {
+            x: 0.5,
+            y: 0.5,
+            scale: 1.0,
+            rotation_deg: 0.0,
+            opacity: 1.0,
+            layer: 0,
+            fit: FitMode::Contain,
+        }
+    }
+}
+
+/// A still image (screenshot, diagram, slide) shown for a span of time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImageClip {
+    pub id: String,
+    pub source: RelativeAssetPath,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub transform: Transform,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// A character stand-in (立ち絵): an image that belongs to a speaker.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CharacterClip {
+    pub id: String,
+    pub source: RelativeAssetPath,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    /// Canonical speaker key (e.g. `reimu`) this stand-in represents, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
+    #[serde(default)]
+    pub transform: Transform,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// Background music. Audio only: no placement in the frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BgmClip {
+    pub id: String,
+    pub source: RelativeAssetPath,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    /// Linear gain, `1.0` = as authored.
+    #[serde(default = "default_volume")]
+    pub volume: f32,
+    /// Repeat the source until `duration_ms` is filled instead of going silent.
+    #[serde(default)]
+    pub looping: bool,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// A one-shot sound effect. Audio only: no placement in the frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SoundEffectClip {
+    pub id: String,
+    pub source: RelativeAssetPath,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    /// Linear gain, `1.0` = as authored.
+    #[serde(default = "default_volume")]
+    pub volume: f32,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+fn default_volume() -> f32 {
+    1.0
 }
 
 impl VideoProject {
@@ -222,6 +366,46 @@ impl VideoProject {
             .flat_map(|t| t.clips.iter())
             .filter_map(|c| match c {
                 Clip::Background(a) => Some(a),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn image_clips(&self) -> Vec<&ImageClip> {
+        self.tracks_of(TrackKind::Image)
+            .flat_map(|t| t.clips.iter())
+            .filter_map(|c| match c {
+                Clip::Image(a) => Some(a),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn character_clips(&self) -> Vec<&CharacterClip> {
+        self.tracks_of(TrackKind::Character)
+            .flat_map(|t| t.clips.iter())
+            .filter_map(|c| match c {
+                Clip::Character(a) => Some(a),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn bgm_clips(&self) -> Vec<&BgmClip> {
+        self.tracks_of(TrackKind::Bgm)
+            .flat_map(|t| t.clips.iter())
+            .filter_map(|c| match c {
+                Clip::Bgm(a) => Some(a),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn sound_effect_clips(&self) -> Vec<&SoundEffectClip> {
+        self.tracks_of(TrackKind::SoundEffect)
+            .flat_map(|t| t.clips.iter())
+            .filter_map(|c| match c {
+                Clip::SoundEffect(a) => Some(a),
                 _ => None,
             })
             .collect()
@@ -381,6 +565,175 @@ mod tests {
             "tracks": [{"id": "a", "kind": "audio", "clips": [
               {"type": "audio", "id": "c", "source": "C:/x/a.wav",
                "start_ms": 0, "duration_ms": 1, "speaker": "s"}]}]}"#;
+        assert!(VideoProject::from_json(json).is_err());
+    }
+
+    fn visual_and_media_project() -> VideoProject {
+        let mut p = sample();
+        p.tracks.push(Track {
+            id: "image".into(),
+            kind: TrackKind::Image,
+            clips: vec![Clip::Image(ImageClip {
+                id: "image-001".into(),
+                source: RelativeAssetPath::new("assets/image/rust.png").unwrap(),
+                start_ms: 500,
+                duration_ms: 2000,
+                transform: Transform {
+                    x: 0.75,
+                    y: 0.25,
+                    scale: 0.5,
+                    rotation_deg: -3.0,
+                    opacity: 0.9,
+                    layer: 10,
+                    fit: FitMode::Cover,
+                },
+                extra: BTreeMap::from([("note".to_string(), serde_json::json!("hero"))]),
+            })],
+        });
+        p.tracks.push(Track {
+            id: "character".into(),
+            kind: TrackKind::Character,
+            clips: vec![Clip::Character(CharacterClip {
+                id: "character-001".into(),
+                source: RelativeAssetPath::new("assets/character/reimu/normal.png").unwrap(),
+                start_ms: 0,
+                duration_ms: 3410,
+                speaker: Some("reimu".into()),
+                transform: Transform::default(),
+                extra: BTreeMap::new(),
+            })],
+        });
+        p.tracks.push(Track {
+            id: "bgm".into(),
+            kind: TrackKind::Bgm,
+            clips: vec![Clip::Bgm(BgmClip {
+                id: "bgm-001".into(),
+                source: RelativeAssetPath::new("assets/bgm/main.mp3").unwrap(),
+                start_ms: 0,
+                duration_ms: 3410,
+                volume: 0.6,
+                looping: true,
+                extra: BTreeMap::new(),
+            })],
+        });
+        p.tracks.push(Track {
+            id: "se".into(),
+            kind: TrackKind::SoundEffect,
+            clips: vec![Clip::SoundEffect(SoundEffectClip {
+                id: "se-001".into(),
+                source: RelativeAssetPath::new("assets/se/pop.wav").unwrap(),
+                start_ms: 1200,
+                duration_ms: 800,
+                volume: 1.0,
+                extra: BTreeMap::new(),
+            })],
+        });
+        p
+    }
+
+    #[test]
+    fn clip_helpers_cover_visual_and_media_variants() {
+        let p = visual_and_media_project();
+
+        let image = p.image_clips()[0];
+        let character = p.character_clips()[0];
+        let bgm = p.bgm_clips()[0];
+        let se = p.sound_effect_clips()[0];
+        assert_eq!(image.id, "image-001");
+        assert_eq!(character.speaker.as_deref(), Some("reimu"));
+        assert_eq!(bgm.volume, 0.6);
+        assert_eq!(se.duration_ms, 800);
+
+        let by_id: BTreeMap<&str, &Clip> = p.clips().map(|c| (c.id(), c)).collect();
+        let image = by_id["image-001"];
+        assert_eq!(image.start_ms(), 500);
+        assert_eq!(image.duration_ms(), 2000);
+        assert_eq!(image.end_ms(), 2500);
+        assert_eq!(image.asset().unwrap().as_str(), "assets/image/rust.png");
+        assert_eq!(
+            by_id["character-001"].asset().unwrap().as_str(),
+            "assets/character/reimu/normal.png"
+        );
+        assert_eq!(
+            by_id["bgm-001"].asset().unwrap().as_str(),
+            "assets/bgm/main.mp3"
+        );
+        assert_eq!(by_id["se-001"].end_ms(), 2000);
+    }
+
+    #[test]
+    fn roundtrip_json_with_mixed_clips_preserves_every_field() {
+        let mut p = visual_and_media_project();
+        p.extra
+            .insert("future_field".into(), serde_json::json!({"a": 1}));
+
+        let json = p.to_json().unwrap();
+        assert!(json.contains("\"type\": \"image\""));
+        assert!(json.contains("\"type\": \"character\""));
+        assert!(json.contains("\"type\": \"bgm\""));
+        assert!(json.contains("\"type\": \"sound_effect\""));
+        assert!(json.contains("\"kind\": \"bgm\""));
+        assert!(json.contains("\"fit\": \"cover\""));
+
+        let back = VideoProject::from_json(&json).unwrap();
+        assert_eq!(back, p);
+        assert_eq!(back.to_json().unwrap(), json);
+        assert_eq!(
+            back.schema_version, 1,
+            "additive change must not bump the schema"
+        );
+    }
+
+    #[test]
+    fn referenced_assets_include_visual_and_media_clips() {
+        let p = visual_and_media_project();
+        let assets = p.referenced_assets();
+        let assets: Vec<&str> = assets.iter().map(|a| a.as_str()).collect();
+        assert_eq!(
+            assets,
+            vec![
+                "assets/audio/001.wav",
+                "assets/bgm/main.mp3",
+                "assets/character/reimu/normal.png",
+                "assets/image/rust.png",
+                "assets/se/pop.wav",
+            ]
+        );
+    }
+
+    #[test]
+    fn transform_and_volume_default_when_omitted_in_json() {
+        let json = r#"{"schema_version": 1, "id": "x", "title": "X",
+            "video": {"width": 1, "height": 1, "fps": 1}, "source": {},
+            "tracks": [
+              {"id": "i", "kind": "image", "clips": [
+                {"type": "image", "id": "i1", "source": "assets/image/a.png",
+                 "start_ms": 0, "duration_ms": 1, "transform": {"layer": 3}}]},
+              {"id": "b", "kind": "bgm", "clips": [
+                {"type": "bgm", "id": "b1", "source": "assets/bgm/a.mp3",
+                 "start_ms": 0, "duration_ms": 1}]}
+            ]}"#;
+        let p = VideoProject::from_json(json).unwrap();
+        let image = p.image_clips()[0];
+        assert_eq!(image.transform.layer, 3);
+        assert_eq!(image.transform.x, 0.5);
+        assert_eq!(image.transform.y, 0.5);
+        assert_eq!(image.transform.scale, 1.0);
+        assert_eq!(image.transform.rotation_deg, 0.0);
+        assert_eq!(image.transform.opacity, 1.0);
+        assert_eq!(image.transform.fit, FitMode::Contain);
+        let bgm = p.bgm_clips()[0];
+        assert_eq!(bgm.volume, 1.0);
+        assert!(!bgm.looping);
+    }
+
+    #[test]
+    fn rejects_unknown_fit_mode() {
+        let json = r#"{"schema_version": 1, "id": "x", "title": "X",
+            "video": {"width": 1, "height": 1, "fps": 1}, "source": {},
+            "tracks": [{"id": "i", "kind": "image", "clips": [
+                {"type": "image", "id": "i1", "source": "assets/image/a.png",
+                 "start_ms": 0, "duration_ms": 1, "transform": {"fit": "anchor_point"}}]}]}"#;
         assert!(VideoProject::from_json(json).is_err());
     }
 

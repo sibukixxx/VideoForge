@@ -625,6 +625,7 @@ pub enum TrackKind {
     Image,
     Background,
     SoundEffect,
+    Bgm,
 }
 ```
 
@@ -671,6 +672,71 @@ Exporterでframeへ変換する。
 - FPS変更に強い
 - 音声実尺との対応が容易
 - FCPXML等への将来展開が容易
+
+---
+
+## 11.5 Visual / Media Clip（P3-01, issue #15）
+
+音声+字幕以外の素材をタイムラインに載せるための clip。
+`Clip` は `type` タグ付き enum で、`audio` / `caption` / `background` に加えて
+`image` / `character` / `bgm` / `sound_effect` を持つ。
+
+```rust
+pub struct ImageClip {
+    pub id: String,
+    pub source: RelativeAssetPath,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    pub transform: Transform,
+}
+
+pub struct CharacterClip {
+    pub id: String,
+    pub source: RelativeAssetPath,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    pub speaker: Option<String>,   // canonical speaker key
+    pub transform: Transform,
+}
+
+pub struct BgmClip {
+    pub id: String,
+    pub source: RelativeAssetPath,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    pub volume: f32,               // linear gain, 1.0 = as authored
+    pub looping: bool,
+}
+
+pub struct SoundEffectClip {
+    pub id: String,
+    pub source: RelativeAssetPath,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    pub volume: f32,
+}
+```
+
+`Transform` は **静的な値だけ** を持つ。キーフレーム・イージング・時間変化する値は持たない。
+時間変化する演出は presentation intent（P3-02）として clip に付け、補間は renderer 側の責務にする。
+
+```rust
+pub struct Transform {
+    pub x: f32,             // clip の中心。0.0 = 左端, 1.0 = 右端
+    pub y: f32,             // clip の中心。0.0 = 上端, 1.0 = 下端
+    pub scale: f32,         // fit 後のサイズに掛ける倍率。1.0 = そのまま
+    pub rotation_deg: f32,  // 中心まわり時計回り
+    pub opacity: f32,       // 0.0 (透明) … 1.0 (不透明)
+    pub layer: i32,         // z-order。大きいほど手前
+    pub fit: FitMode,       // Contain / Cover / Stretch / None
+}
+```
+
+座標系はフレームに対する正規化座標で、After Effects の anchor point や
+DaVinci Resolve のノードなど特定 NLE の概念は持ち込まない。
+`transform` と `volume` は JSON で省略可能（省略時は中央・等倍・不透明・layer 0 / gain 1.0）。
+
+追加は既存ファイルに対して加算的なので `schema_version` は上げない。
 
 ---
 

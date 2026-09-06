@@ -17,7 +17,8 @@ pub mod time;
 
 pub use path::{PathError, RelativeAssetPath};
 pub use project::{
-    AudioClip, BackgroundClip, CaptionClip, Clip, ProjectError, SourceInfo, Track, TrackKind,
-    VideoProject, VideoSettings, SCHEMA_VERSION,
+    AudioClip, BackgroundClip, BgmClip, CaptionClip, CharacterClip, Clip, FitMode, ImageClip,
+    ProjectError, SoundEffectClip, SourceInfo, Track, TrackKind, Transform, VideoProject,
+    VideoSettings, SCHEMA_VERSION,
 };
 pub use time::{format_srt_timestamp, format_timespan, frame_to_millis, millis_to_frame};
