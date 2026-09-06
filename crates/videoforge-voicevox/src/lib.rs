@@ -26,13 +26,25 @@ pub struct VoicevoxEngine {
 }
 
 impl VoicevoxEngine {
-    pub fn new(endpoint: impl Into<String>, timeout: Duration) -> Self {
+    /// `allow_remote_endpoint` mirrors `videoforge.yaml`'s `tts.allow_remote_endpoint`
+    /// (VF-004): by default `endpoint` must be localhost/127.0.0.1/::1. This is
+    /// checked again here (not just in `Config::validate`) so that callers who
+    /// construct the engine directly with a CLI-supplied endpoint cannot bypass
+    /// the restriction. Redirects are disabled so a compromised or misconfigured
+    /// endpoint cannot redirect requests elsewhere.
+    pub fn new(
+        endpoint: impl Into<String>,
+        timeout: Duration,
+        allow_remote_endpoint: bool,
+    ) -> Result<Self, AppError> {
         let endpoint = endpoint.into().trim_end_matches('/').to_string();
+        videoforge_core::config::check_endpoint_allowed(&endpoint, allow_remote_endpoint)?;
         let client = reqwest::Client::builder()
             .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("reqwest client");
-        Self { endpoint, client }
+        Ok(Self { endpoint, client })
     }
 
     pub fn endpoint(&self) -> &str {
@@ -217,15 +229,33 @@ mod tests {
 
     #[test]
     fn endpoint_trailing_slash_is_trimmed() {
-        let e = VoicevoxEngine::new("http://localhost:50021/", Duration::from_secs(1));
+        let e =
+            VoicevoxEngine::new("http://localhost:50021/", Duration::from_secs(1), false).unwrap();
         assert_eq!(e.endpoint(), "http://localhost:50021");
         assert_eq!(e.url("/version"), "http://localhost:50021/version");
     }
 
     #[tokio::test]
     async fn unreachable_endpoint_reports_unavailable() {
-        let e = VoicevoxEngine::new("http://127.0.0.1:1", Duration::from_secs(1));
+        let e = VoicevoxEngine::new("http://127.0.0.1:1", Duration::from_secs(1), false).unwrap();
         let err = e.health().await.unwrap_err();
         assert!(matches!(err, AppError::VoicevoxUnavailable { .. }), "{err}");
+    }
+
+    #[test]
+    fn remote_endpoint_is_rejected_without_opt_in() {
+        let err = VoicevoxEngine::new("http://example.com:50021", Duration::from_secs(1), false)
+            .unwrap_err();
+        assert!(
+            matches!(err, AppError::RemoteEndpointNotAllowed { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn remote_endpoint_is_allowed_with_opt_in() {
+        assert!(
+            VoicevoxEngine::new("http://example.com:50021", Duration::from_secs(1), true).is_ok()
+        );
     }
 }

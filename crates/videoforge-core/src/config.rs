@@ -108,6 +108,10 @@ pub struct TtsConfig {
     /// Per-request timeout in seconds.
     #[serde(default = "d_timeout")]
     pub timeout_secs: u64,
+    /// Explicit opt-in required for `endpoint` to point outside localhost
+    /// (VF-004: default-deny to avoid SSRF via an agent-edited config).
+    #[serde(default)]
+    pub allow_remote_endpoint: bool,
 }
 fn d_engine() -> String {
     "voicevox".into()
@@ -128,7 +132,37 @@ impl Default for TtsConfig {
             endpoint: d_endpoint(),
             concurrency: d_concurrency(),
             timeout_secs: d_timeout(),
+            allow_remote_endpoint: false,
         }
+    }
+}
+
+/// Reject a TTS `endpoint` that is neither `localhost` nor a loopback address
+/// unless `allow_remote` (`tts.allow_remote_endpoint`) explicitly opts in.
+///
+/// This is a config-time guard against SSRF in workspace setups where an
+/// agent may generate or edit `videoforge.yaml`; [`AppError::RemoteEndpointNotAllowed`]
+/// is also enforced at TTS-engine construction time as defense in depth for
+/// callers (e.g. `--endpoint` CLI overrides) that bypass config validation.
+/// It does not protect against DNS rebinding of the `localhost` name itself.
+pub fn check_endpoint_allowed(endpoint: &str, allow_remote: bool) -> Result<(), AppError> {
+    if allow_remote {
+        return Ok(());
+    }
+    let url = url::Url::parse(endpoint)
+        .map_err(|e| AppError::Other(format!("endpoint `{endpoint}` is not a valid URL: {e}")))?;
+    let loopback = match url.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    if loopback {
+        Ok(())
+    } else {
+        Err(AppError::RemoteEndpointNotAllowed {
+            endpoint: endpoint.to_string(),
+        })
     }
 }
 
@@ -268,6 +302,9 @@ impl Config {
         if self.tts.concurrency == 0 {
             return Err(invalid("tts.concurrency must be >= 1".into()));
         }
+        if let Err(e) = check_endpoint_allowed(&self.tts.endpoint, self.tts.allow_remote_endpoint) {
+            return Err(invalid(format!("tts.endpoint: {e}")));
+        }
         if self.speakers.is_empty() {
             return Err(invalid("at least one speaker must be configured".into()));
         }
@@ -346,6 +383,8 @@ tts:
   endpoint: http://127.0.0.1:50021
   concurrency: 1
   timeout_secs: 120
+  # endpoint must be localhost/127.0.0.1/::1 unless you opt in here:
+  # allow_remote_endpoint: true
 
 # Speaker keys are canonical ids used in project.vfp.json.
 # Aliases are the names you write in scripts (e.g. `霊夢:`).
@@ -434,5 +473,55 @@ mod tests {
         );
         assert!(bad("version: 2\nspeakers:\n  a: {}\n").contains("version"));
         assert!(bad("unknown_key: 1\nspeakers:\n  a: {}\n").contains("unknown"));
+    }
+
+    #[test]
+    fn rejects_remote_endpoint_by_default() {
+        let err = Config::parse(
+            "tts:\n  endpoint: http://example.com:50021\nspeakers:\n  a: {}\n",
+            Path::new("x.yaml"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("tts.endpoint"), "{err}");
+        assert!(err.contains("not allowed"), "{err}");
+    }
+
+    #[test]
+    fn allows_remote_endpoint_when_opted_in() {
+        let cfg = Config::parse(
+            "tts:\n  endpoint: http://example.com:50021\n  allow_remote_endpoint: true\nspeakers:\n  a: {}\n",
+            Path::new("x.yaml"),
+        )
+        .unwrap();
+        assert_eq!(cfg.tts.endpoint, "http://example.com:50021");
+    }
+
+    #[test]
+    fn accepts_loopback_variants() {
+        for endpoint in [
+            "http://127.0.0.1:50021",
+            "http://localhost:50021",
+            "http://LOCALHOST:50021",
+            "http://[::1]:50021",
+        ] {
+            check_endpoint_allowed(endpoint, false).unwrap_or_else(|e| {
+                panic!("expected {endpoint} to be allowed, got {e}");
+            });
+        }
+    }
+
+    #[test]
+    fn rejects_non_loopback_hosts() {
+        for endpoint in [
+            "http://example.com:50021",
+            "http://169.254.169.254/latest/meta-data",
+            "http://0.0.0.0:50021",
+        ] {
+            assert!(
+                check_endpoint_allowed(endpoint, false).is_err(),
+                "expected {endpoint} to be rejected"
+            );
+        }
     }
 }

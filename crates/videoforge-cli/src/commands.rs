@@ -40,15 +40,20 @@ impl Context {
     }
 }
 
-fn make_tts(fake: bool, endpoint: &str, timeout_secs: u64) -> Arc<dyn TtsEngine> {
+fn make_tts(
+    fake: bool,
+    endpoint: &str,
+    timeout_secs: u64,
+    allow_remote_endpoint: bool,
+) -> anyhow::Result<Arc<dyn TtsEngine>> {
     if fake {
-        Arc::new(FakeTtsEngine::default())
-    } else {
-        Arc::new(VoicevoxEngine::new(
-            endpoint,
-            Duration::from_secs(timeout_secs.max(1)),
-        ))
+        return Ok(Arc::new(FakeTtsEngine::default()));
     }
+    Ok(Arc::new(VoicevoxEngine::new(
+        endpoint,
+        Duration::from_secs(timeout_secs.max(1)),
+        allow_remote_endpoint,
+    )?))
 }
 
 fn exit(code: u8) -> anyhow::Result<ExitCode> {
@@ -90,14 +95,20 @@ pub async fn doctor(
     endpoint: Option<String>,
 ) -> anyhow::Result<ExitCode> {
     let workspace = ctx.workspace_for(None);
-    let (endpoint, timeout) = match workspace.as_ref().ok().and_then(|ws| ws.load_config().ok()) {
-        Some(cfg) => (endpoint.unwrap_or(cfg.tts.endpoint), cfg.tts.timeout_secs),
-        None => (
-            endpoint.unwrap_or_else(|| videoforge_voicevox::DEFAULT_ENDPOINT.to_string()),
-            30,
-        ),
-    };
-    let tts = make_tts(fake_tts, &endpoint, timeout);
+    let (endpoint, timeout, allow_remote) =
+        match workspace.as_ref().ok().and_then(|ws| ws.load_config().ok()) {
+            Some(cfg) => (
+                endpoint.unwrap_or(cfg.tts.endpoint),
+                cfg.tts.timeout_secs,
+                cfg.tts.allow_remote_endpoint,
+            ),
+            None => (
+                endpoint.unwrap_or_else(|| videoforge_voicevox::DEFAULT_ENDPOINT.to_string()),
+                30,
+                false,
+            ),
+        };
+    let tts = make_tts(fake_tts, &endpoint, timeout, allow_remote)?;
     let preview = FfmpegPreviewRenderer::detect();
     let exporter = Ymm4Exporter::new();
     let platform = current_platform();
@@ -157,7 +168,8 @@ pub async fn speakers(
     let endpoint = endpoint
         .or_else(|| cfg.as_ref().map(|c| c.tts.endpoint.clone()))
         .unwrap_or_else(|| videoforge_voicevox::DEFAULT_ENDPOINT.to_string());
-    let tts = make_tts(fake_tts, &endpoint, 30);
+    let allow_remote = cfg.as_ref().is_some_and(|c| c.tts.allow_remote_endpoint);
+    let tts = make_tts(fake_tts, &endpoint, 30, allow_remote)?;
     let speakers = tts.list_speakers().await?;
     if ctx.json {
         ctx.emit_json(&speakers)?;
@@ -231,9 +243,10 @@ fn resolve_script(ws: &Workspace, script: &Path) -> anyhow::Result<PathBuf> {
     if script.is_file() {
         return Ok(script.to_path_buf());
     }
-    let in_ws = ws.resolve(&script.to_string_lossy());
-    if in_ws.is_file() {
-        return Ok(in_ws);
+    if let Ok(in_ws) = ws.resolve(&script.to_string_lossy()) {
+        if in_ws.is_file() {
+            return Ok(in_ws);
+        }
     }
     Err(anyhow!("script not found: {}", script.display()))
 }
@@ -256,7 +269,12 @@ pub async fn generate(ctx: &Context, args: GenerateArgs) -> anyhow::Result<ExitC
     let script = resolve_script(&ws, &args.script)?;
 
     let endpoint = args.endpoint.unwrap_or(cfg.tts.endpoint.clone());
-    let tts = make_tts(args.fake_tts, &endpoint, cfg.tts.timeout_secs);
+    let tts = make_tts(
+        args.fake_tts,
+        &endpoint,
+        cfg.tts.timeout_secs,
+        cfg.tts.allow_remote_endpoint,
+    )?;
     let platform = current_platform();
     let cache = if args.no_cache {
         None
@@ -453,6 +471,7 @@ pub fn bundle_ymm4(
     out: Option<PathBuf>,
     template: Option<PathBuf>,
     zip: bool,
+    force: bool,
 ) -> anyhow::Result<ExitCode> {
     let project_path = project_path
         .canonicalize()
@@ -465,6 +484,7 @@ pub fn bundle_ymm4(
             out_dir: out,
             template,
             zip,
+            force,
         },
     )?;
     if ctx.json {

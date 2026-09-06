@@ -11,6 +11,12 @@ pub enum AppError {
     InvalidConfig { path: PathBuf, reason: String },
     #[error("invalid script: {0}")]
     InvalidScript(String),
+    #[error("invalid workspace path `{path}`: {reason}")]
+    InvalidWorkspacePath { path: String, reason: String },
+    #[error("remote TTS endpoint `{endpoint}` is not allowed (only localhost/127.0.0.1/::1 are permitted; set tts.allow_remote_endpoint: true to opt in)")]
+    RemoteEndpointNotAllowed { endpoint: String },
+    #[error("refusing to overwrite {path}: {reason}")]
+    UnsafeOverwrite { path: PathBuf, reason: String },
     #[error("unknown speaker `{speaker}` on line {line} (known speakers: {known})")]
     UnknownSpeaker {
         speaker: String,
@@ -68,6 +74,9 @@ impl AppError {
             AppError::WorkspaceNotFound(_) => "workspace_not_found",
             AppError::InvalidConfig { .. } => "invalid_config",
             AppError::InvalidScript(_) => "invalid_script",
+            AppError::InvalidWorkspacePath { .. } => "invalid_workspace_path",
+            AppError::RemoteEndpointNotAllowed { .. } => "remote_endpoint_not_allowed",
+            AppError::UnsafeOverwrite { .. } => "unsafe_overwrite",
             AppError::UnknownSpeaker { .. } => "unknown_speaker",
             AppError::VoicevoxUnavailable { .. } => "voicevox_unavailable",
             AppError::VoicevoxSynthesisFailed { .. } => "voicevox_synthesis_failed",

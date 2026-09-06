@@ -1570,6 +1570,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
  "videoforge-platform",
  "videoforge-project",
  "videoforge-script",
@@ -1582,6 +1583,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "dirs",
  "serde",
  "serde_json",
  "tempfile",

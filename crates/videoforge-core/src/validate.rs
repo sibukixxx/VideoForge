@@ -144,19 +144,33 @@ pub fn validate_script(
     }
 
     if let Some(bg) = &config.preview.background {
-        if config.preview.enabled && !workspace.resolve(bg).is_file() {
-            report.warnings.push(ValidationIssue::new(
-                None,
-                format!("preview background `{bg}` not found; a flat color will be used"),
-            ));
+        if config.preview.enabled {
+            match workspace.resolve(bg) {
+                Ok(path) if path.is_file() => {}
+                Ok(_) => report.warnings.push(ValidationIssue::new(
+                    None,
+                    format!("preview background `{bg}` not found; a flat color will be used"),
+                )),
+                Err(e) => report.errors.push(ValidationIssue::new(
+                    None,
+                    format!("preview.background `{bg}` is invalid: {e}"),
+                )),
+            }
         }
     }
     if let Some(font) = &config.preview.font {
-        if config.preview.enabled && !workspace.resolve(font).is_file() {
-            report.warnings.push(ValidationIssue::new(
-                None,
-                format!("preview font `{font}` not found; FFmpeg default font will be used"),
-            ));
+        if config.preview.enabled {
+            match workspace.resolve_allow_absolute(font) {
+                Ok(path) if path.is_file() => {}
+                Ok(_) => report.warnings.push(ValidationIssue::new(
+                    None,
+                    format!("preview font `{font}` not found; FFmpeg default font will be used"),
+                )),
+                Err(e) => report.errors.push(ValidationIssue::new(
+                    None,
+                    format!("preview.font `{font}` is invalid: {e}"),
+                )),
+            }
         }
     }
 

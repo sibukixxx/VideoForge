@@ -36,8 +36,13 @@ pub const NON_WINDOWS_REASON: &str =
 
 #[derive(Debug, Clone, Default)]
 pub struct Ymm4Exporter {
-    /// Allow materialization on non-Windows hosts. Only for tests/spikes: the
-    /// resulting paths will not be valid for YMM4.
+    /// Allow materialization on non-Windows hosts. For CI/test coverage of
+    /// the template-patch logic on Linux/macOS runners only (see
+    /// `videoforge-cli/tests/cli.rs` and `docs/testing/ymm4-manual-e2e.md`):
+    /// the resulting paths are Windows paths that do not exist on the host
+    /// running this, so they are never valid for a real YMM4 install. Not a
+    /// supported production workflow; the CLI hides the corresponding
+    /// `--force` flag from `--help`.
     pub force_non_windows: bool,
 }
 
@@ -62,7 +67,7 @@ impl Ymm4Exporter {
         }
         if let Some(ws) = request.workspace {
             let cfg = ws.load_config()?;
-            let path = ws.resolve(&cfg.export.ymm4.template);
+            let path = ws.resolve(&cfg.export.ymm4.template)?;
             if path.is_file() {
                 return Ok(path);
             }
