@@ -26,9 +26,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use videoforge_project::{
-    AudioClip, BackgroundClip, BgmClip, CaptionClip, CharacterClip, Clip, ImageClip, Presentation,
-    RelativeAssetPath, SoundEffectClip, SourceInfo, Track, TrackKind, Transform, VideoProject,
-    VideoSettings,
+    AudioClip, BackgroundClip, BgmClip, CaptionClip, CharacterClip, CharacterPerformanceClip, Clip,
+    ImageClip, Presentation, RelativeAssetPath, SoundEffectClip, SourceInfo, Track, TrackKind,
+    Transform, VideoProject, VideoSettings,
 };
 
 /// Default length of a sound effect clip when the script gives none.
@@ -42,6 +42,8 @@ pub enum TimelineError {
     ZeroDuration { index: usize },
     #[error("visual event is anchored to dialogue {index}, which does not exist")]
     UnknownAnchor { index: usize },
+    #[error("character performance is anchored to dialogue {index}, which does not exist")]
+    UnknownCharacterPerformanceAnchor { index: usize },
 }
 
 /// One synthesized dialogue ready to be scheduled.
@@ -119,7 +121,24 @@ pub struct TimelineInput {
     pub background: Option<RelativeAssetPath>,
     /// Image / character / bgm / sound-effect events, in script order.
     pub visual_events: Vec<VisualEvent>,
+    /// Live2D/VOICEVOX character performance data (design §9, §11), one
+    /// entry per dialogue that performs as a character. Empty for any
+    /// project that does not use the character/Live2D feature at all — no
+    /// `character_performance` track is emitted in that case.
+    pub character_performance: Vec<CharacterPerformanceInput>,
     pub options: TimelineOptions,
+}
+
+/// One dialogue's resolved character performance, ready to be placed on the
+/// timeline at that dialogue's scheduled start/duration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CharacterPerformanceInput {
+    /// 1-based dialogue index this performance belongs to.
+    pub index: usize,
+    pub character: String,
+    pub expression: String,
+    pub motion: String,
+    pub lip_sync: RelativeAssetPath,
 }
 
 /// Where each dialogue landed on the timeline.
@@ -217,6 +236,32 @@ pub fn build(input: TimelineInput) -> Result<VideoProject, TimelineError> {
         kind: TrackKind::Caption,
         clips: caption_clips,
     });
+
+    let mut character_performance_clips = Vec::with_capacity(input.character_performance.len());
+    for cp in &input.character_performance {
+        let s = scheduled
+            .iter()
+            .find(|s| s.index == cp.index)
+            .ok_or(TimelineError::UnknownCharacterPerformanceAnchor { index: cp.index })?;
+        character_performance_clips.push(Clip::CharacterPerformance(CharacterPerformanceClip {
+            id: format!("character-performance-{:03}", cp.index),
+            start_ms: s.start_ms,
+            duration_ms: s.end_ms - s.start_ms,
+            character: cp.character.clone(),
+            expression: cp.expression.clone(),
+            motion: cp.motion.clone(),
+            lip_sync: cp.lip_sync.clone(),
+            extra: BTreeMap::new(),
+        }));
+    }
+    if !character_performance_clips.is_empty() {
+        project.tracks.push(Track {
+            id: "character_performance".into(),
+            kind: TrackKind::CharacterPerformance,
+            clips: character_performance_clips,
+        });
+    }
+
     for track in place_visual_events(&input.visual_events, &scheduled, total)? {
         project.tracks.push(track);
     }
@@ -414,6 +459,7 @@ mod tests {
             dialogues: vec![dialogue(1, "reimu", 3410), dialogue(2, "marisa", 3680)],
             background: Some(RelativeAssetPath::new("assets/background/default.png").unwrap()),
             visual_events: Vec::new(),
+            character_performance: Vec::new(),
             options: TimelineOptions::default(),
         })
         .unwrap();
@@ -473,6 +519,7 @@ mod tests {
             ],
             background: None,
             visual_events,
+            character_performance: Vec::new(),
             options: TimelineOptions::default(),
         })
         .unwrap()
@@ -593,9 +640,87 @@ mod tests {
             dialogues: vec![dialogue(1, "reimu", 1000)],
             background: None,
             visual_events: vec![image(7, "assets/image/a.png", None)],
+            character_performance: Vec::new(),
             options: TimelineOptions::default(),
         })
         .unwrap_err();
         assert!(matches!(err, TimelineError::UnknownAnchor { index: 7 }));
+    }
+
+    #[test]
+    fn character_performance_is_placed_at_its_dialogues_schedule() {
+        let project = build(TimelineInput {
+            id: "t".into(),
+            title: "T".into(),
+            video: VideoSettings::default(),
+            source: SourceInfo::default(),
+            dialogues: vec![dialogue(1, "tsumugi", 1000), dialogue(2, "tsumugi", 500)],
+            background: None,
+            visual_events: Vec::new(),
+            character_performance: vec![
+                CharacterPerformanceInput {
+                    index: 1,
+                    character: "tsumugi".into(),
+                    expression: "smile".into(),
+                    motion: "wave".into(),
+                    lip_sync: asset("assets/character/tsumugi/lipsync-001.json"),
+                },
+                CharacterPerformanceInput {
+                    index: 2,
+                    character: "tsumugi".into(),
+                    expression: "default".into(),
+                    motion: "idle".into(),
+                    lip_sync: asset("assets/character/tsumugi/lipsync-002.json"),
+                },
+            ],
+            options: TimelineOptions::default(),
+        })
+        .unwrap();
+
+        let clips = project.character_performance_clips();
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[0].start_ms, 0);
+        assert_eq!(clips[0].duration_ms, 1000);
+        assert_eq!(clips[0].expression, "smile");
+        assert_eq!(clips[0].motion, "wave");
+        // gap of 200ms between dialogues (TimelineOptions::default())
+        assert_eq!(clips[1].start_ms, 1200);
+        assert_eq!(clips[1].duration_ms, 500);
+    }
+
+    #[test]
+    fn no_character_performance_track_when_input_is_empty() {
+        let project = three_dialogues(Vec::new());
+        assert!(project.character_performance_clips().is_empty());
+        assert!(!project
+            .tracks
+            .iter()
+            .any(|t| t.kind == TrackKind::CharacterPerformance));
+    }
+
+    #[test]
+    fn unknown_character_performance_anchor_is_an_error() {
+        let err = build(TimelineInput {
+            id: "t".into(),
+            title: "T".into(),
+            video: VideoSettings::default(),
+            source: SourceInfo::default(),
+            dialogues: vec![dialogue(1, "reimu", 1000)],
+            background: None,
+            visual_events: Vec::new(),
+            character_performance: vec![CharacterPerformanceInput {
+                index: 9,
+                character: "tsumugi".into(),
+                expression: "default".into(),
+                motion: "idle".into(),
+                lip_sync: asset("assets/character/tsumugi/lipsync-009.json"),
+            }],
+            options: TimelineOptions::default(),
+        })
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            TimelineError::UnknownCharacterPerformanceAnchor { index: 9 }
+        ));
     }
 }

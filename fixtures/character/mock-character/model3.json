@@ -1,0 +1,18 @@
+{
+  "Version": 3,
+  "FileReferences": {
+    "Moc": "mock.moc3",
+    "Expressions": [
+      { "Name": "default", "File": "expressions/default.exp3.json" },
+      { "Name": "smile", "File": "expressions/smile.exp3.json" },
+      { "Name": "surprised", "File": "expressions/surprised.exp3.json" }
+    ],
+    "Motions": {
+      "Idle": [{ "File": "motions/idle_01.motion3.json" }],
+      "Wave": [{ "File": "motions/wave_01.motion3.json" }]
+    }
+  },
+  "Groups": [
+    { "Target": "Parameter", "Name": "LipSync", "Ids": ["ParamMouthOpenY"] }
+  ]
+}

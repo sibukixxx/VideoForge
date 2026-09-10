@@ -33,6 +33,36 @@ pub enum AppError {
         reason: String,
     },
 
+    #[error("VOICEVOX has no speaker `{speaker}` with style `{style}` (known: {known})")]
+    VoicevoxSpeakerNotFound {
+        speaker: String,
+        style: String,
+        known: String,
+    },
+
+    #[error("character `{id}` not found in character manifest (known characters: {known})")]
+    CharacterNotFound { id: String, known: String },
+    #[error("invalid character manifest {path}: {reason}")]
+    CharacterManifestInvalid { path: PathBuf, reason: String },
+    #[error("Live2D model file not found: {path}")]
+    Live2dModelNotFound { path: PathBuf },
+    #[error("Live2D model file {path} is invalid: {reason}")]
+    Live2dModelInvalid { path: PathBuf, reason: String },
+    #[error("character `{character}` has no expression `{expression}` (known: {known})")]
+    ExpressionNotFound {
+        character: String,
+        expression: String,
+        known: String,
+    },
+    #[error("character `{character}` has no motion `{motion}` (known: {known})")]
+    MotionNotFound {
+        character: String,
+        motion: String,
+        known: String,
+    },
+    #[error("lip-sync generation failed for dialogue {index}: {reason}")]
+    LipSyncGenerationFailed { index: usize, reason: String },
+
     #[error("FFmpeg is unavailable: {0}")]
     FfmpegUnavailable(String),
     #[error("preview render failed: {0}")]
@@ -119,6 +149,14 @@ impl AppError {
             AppError::UnknownSpeaker { .. } => "unknown_speaker",
             AppError::VoicevoxUnavailable { .. } => "voicevox_unavailable",
             AppError::VoicevoxSynthesisFailed { .. } => "voicevox_synthesis_failed",
+            AppError::VoicevoxSpeakerNotFound { .. } => "voicevox_speaker_not_found",
+            AppError::CharacterNotFound { .. } => "character_not_found",
+            AppError::CharacterManifestInvalid { .. } => "character_manifest_invalid",
+            AppError::Live2dModelNotFound { .. } => "live2d_model_not_found",
+            AppError::Live2dModelInvalid { .. } => "live2d_model_invalid",
+            AppError::ExpressionNotFound { .. } => "expression_not_found",
+            AppError::MotionNotFound { .. } => "motion_not_found",
+            AppError::LipSyncGenerationFailed { .. } => "lipsync_generation_failed",
             AppError::FfmpegUnavailable(_) => "ffmpeg_unavailable",
             AppError::PreviewRenderFailed(_) => "preview_render_failed",
             AppError::InvalidTemplate { .. } => "invalid_template",
@@ -198,6 +236,25 @@ impl From<videoforge_timeline::TimelineError> for AppError {
 impl From<videoforge_platform::PlatformError> for AppError {
     fn from(e: videoforge_platform::PlatformError) -> Self {
         AppError::UnsupportedPlatform(e.to_string())
+    }
+}
+
+impl From<videoforge_character::CharacterError> for AppError {
+    fn from(e: videoforge_character::CharacterError) -> Self {
+        use videoforge_character::CharacterError as C;
+        match e {
+            C::Read { path, source } => AppError::read(path, source),
+            C::Yaml { path, source } => AppError::CharacterManifestInvalid {
+                path,
+                reason: source.to_string(),
+            },
+            C::ModelNotFound { path } => AppError::Live2dModelNotFound { path },
+            C::ModelInvalid { path, reason } => AppError::Live2dModelInvalid { path, reason },
+            other => AppError::CharacterManifestInvalid {
+                path: PathBuf::new(),
+                reason: other.to_string(),
+            },
+        }
     }
 }
 

@@ -96,6 +96,9 @@ pub enum TrackKind {
     SoundEffect,
     /// Background music. Long, usually looping, laid under the whole timeline.
     Bgm,
+    /// Live2D/VOICEVOX character performance data (expression, motion,
+    /// lip-sync curve) — distinct from `Character` (立ち絵 stand-in images).
+    CharacterPerformance,
 }
 
 /// A clip on a track. Tagged by `type` so exporters can dispatch on it.
@@ -109,6 +112,7 @@ pub enum Clip {
     Character(CharacterClip),
     Bgm(BgmClip),
     SoundEffect(SoundEffectClip),
+    CharacterPerformance(CharacterPerformanceClip),
 }
 
 impl Clip {
@@ -121,6 +125,7 @@ impl Clip {
             Clip::Character(c) => &c.id,
             Clip::Bgm(c) => &c.id,
             Clip::SoundEffect(c) => &c.id,
+            Clip::CharacterPerformance(c) => &c.id,
         }
     }
 
@@ -133,6 +138,7 @@ impl Clip {
             Clip::Character(c) => c.start_ms,
             Clip::Bgm(c) => c.start_ms,
             Clip::SoundEffect(c) => c.start_ms,
+            Clip::CharacterPerformance(c) => c.start_ms,
         }
     }
 
@@ -145,6 +151,7 @@ impl Clip {
             Clip::Character(c) => c.duration_ms,
             Clip::Bgm(c) => c.duration_ms,
             Clip::SoundEffect(c) => c.duration_ms,
+            Clip::CharacterPerformance(c) => c.duration_ms,
         }
     }
 
@@ -162,6 +169,7 @@ impl Clip {
             Clip::Character(c) => Some(&c.source),
             Clip::Bgm(c) => Some(&c.source),
             Clip::SoundEffect(c) => Some(&c.source),
+            Clip::CharacterPerformance(c) => Some(&c.lip_sync),
         }
     }
 }
@@ -296,6 +304,42 @@ pub struct CharacterClip {
     pub extra: BTreeMap<String, serde_json::Value>,
 }
 
+/// One dialogue's Live2D/VOICEVOX character performance: which character,
+/// what expression/motion it plays, and a reference to its deterministic
+/// lip-sync amplitude curve (design §9, §10, §11). Distinct from
+/// `CharacterClip`, which is a static stand-in *image* (立ち絵) — this clip
+/// has no `source`/visual asset of its own; a renderer combines it with the
+/// character's Live2D model (resolved separately, outside the project IR
+/// per design §6) to produce frames in Phase 1.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CharacterPerformanceClip {
+    pub id: String,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    /// Character id from the linked character manifest (design §5), e.g. `tsumugi`.
+    pub character: String,
+    /// `"default"` when the script did not say (design §12).
+    #[serde(default = "default_expression")]
+    pub expression: String,
+    /// `"idle"` when the script did not say (design §12).
+    #[serde(default = "default_motion")]
+    pub motion: String,
+    /// Deterministic, offline-renderable lip-sync curve for this dialogue's
+    /// audio (`core::lipsync::LipSyncTrack`, referenced rather than inlined
+    /// so `project.vfp.json` stays small).
+    pub lip_sync: RelativeAssetPath,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+fn default_expression() -> String {
+    "default".to_string()
+}
+
+fn default_motion() -> String {
+    "idle".to_string()
+}
+
 /// Background music. Audio only: no placement in the frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BgmClip {
@@ -393,6 +437,16 @@ impl VideoProject {
             .flat_map(|t| t.clips.iter())
             .filter_map(|c| match c {
                 Clip::Character(a) => Some(a),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn character_performance_clips(&self) -> Vec<&CharacterPerformanceClip> {
+        self.tracks_of(TrackKind::CharacterPerformance)
+            .flat_map(|t| t.clips.iter())
+            .filter_map(|c| match c {
+                Clip::CharacterPerformance(a) => Some(a),
                 _ => None,
             })
             .collect()
@@ -642,6 +696,92 @@ mod tests {
             })],
         });
         p
+    }
+
+    fn character_performance_project() -> VideoProject {
+        let mut p = sample();
+        p.tracks.push(Track {
+            id: "character_performance".into(),
+            kind: TrackKind::CharacterPerformance,
+            clips: vec![Clip::CharacterPerformance(CharacterPerformanceClip {
+                id: "perf-001".into(),
+                start_ms: 0,
+                duration_ms: 3410,
+                character: "tsumugi".into(),
+                expression: "smile".into(),
+                motion: "wave".into(),
+                lip_sync: RelativeAssetPath::new("assets/character/tsumugi/lipsync-001.json")
+                    .unwrap(),
+                extra: BTreeMap::new(),
+            })],
+        });
+        p
+    }
+
+    #[test]
+    fn character_performance_clip_accessors_and_defaults() {
+        let p = character_performance_project();
+        let clips = p.character_performance_clips();
+        assert_eq!(clips.len(), 1);
+        let c = clips[0];
+        assert_eq!(c.character, "tsumugi");
+        assert_eq!(c.expression, "smile");
+        assert_eq!(c.motion, "wave");
+
+        let clip = Clip::CharacterPerformance(c.clone());
+        assert_eq!(clip.id(), "perf-001");
+        assert_eq!(clip.start_ms(), 0);
+        assert_eq!(clip.duration_ms(), 3410);
+        assert_eq!(clip.end_ms(), 3410);
+        assert_eq!(
+            clip.asset().unwrap().as_str(),
+            "assets/character/tsumugi/lipsync-001.json"
+        );
+
+        let assets = p.referenced_assets();
+        assert!(assets
+            .iter()
+            .any(|a| a.as_str() == "assets/character/tsumugi/lipsync-001.json"));
+    }
+
+    #[test]
+    fn character_performance_expression_and_motion_default_when_omitted_in_json() {
+        let json = r#"{"schema_version": 1, "id": "x", "title": "X",
+            "video": {"width": 1, "height": 1, "fps": 1}, "source": {},
+            "tracks": [
+              {"id": "cp", "kind": "character_performance", "clips": [
+                {"type": "character_performance", "id": "p1", "character": "tsumugi",
+                 "start_ms": 0, "duration_ms": 1000,
+                 "lip_sync": "assets/character/tsumugi/lipsync-001.json"}]}
+            ]}"#;
+        let p = VideoProject::from_json(json).unwrap();
+        let c = &p.character_performance_clips()[0];
+        assert_eq!(c.expression, "default");
+        assert_eq!(c.motion, "idle");
+    }
+
+    #[test]
+    fn character_performance_roundtrips_and_preserves_unknown_fields() {
+        let mut p = character_performance_project();
+        let track = p
+            .tracks
+            .iter_mut()
+            .find(|t| t.kind == TrackKind::CharacterPerformance)
+            .unwrap();
+        if let Clip::CharacterPerformance(c) = &mut track.clips[0] {
+            c.extra
+                .insert("phoneme_hint".into(), serde_json::json!("a"));
+        }
+        let json = p.to_json().unwrap();
+        assert!(json.contains("\"type\": \"character_performance\""));
+        assert!(json.contains("\"kind\": \"character_performance\""));
+
+        let back = VideoProject::from_json(&json).unwrap();
+        assert_eq!(back, p);
+        assert_eq!(
+            back.schema_version, 1,
+            "additive change must not bump the schema"
+        );
     }
 
     #[test]
