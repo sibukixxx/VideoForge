@@ -77,6 +77,29 @@ enum Command {
         #[command(subcommand)]
         target: BundleTarget,
     },
+    /// Inspect or validate a character manifest (VOICEVOX + Live2D pipeline)
+    Character {
+        #[command(subcommand)]
+        target: CharacterTarget,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CharacterTarget {
+    /// Parse a character manifest and print each character's voice/model
+    /// info (offline: no VOICEVOX connection, no workspace required)
+    Inspect {
+        /// Path to a character manifest YAML file
+        manifest: PathBuf,
+    },
+    /// Like `inspect`, plus resolve each character's VOICEVOX speaker/style
+    /// by name and confirm its Live2D model file is readable
+    Validate {
+        /// Path to a character manifest YAML file
+        manifest: PathBuf,
+        #[command(flatten)]
+        tts: TtsArgs,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -186,6 +209,14 @@ async fn main() -> ExitCode {
                     force,
                 },
         } => commands::bundle_ymm4(&ctx, project, out, template, !no_zip, force),
+        Command::Character { target } => match target {
+            CharacterTarget::Inspect { manifest } => {
+                commands::character_inspect(&ctx, manifest).await
+            }
+            CharacterTarget::Validate { manifest, tts } => {
+                commands::character_validate(&ctx, manifest, tts.fake_tts, tts.endpoint).await
+            }
+        },
     };
     match result {
         Ok(code) => code,

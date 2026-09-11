@@ -4,12 +4,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context as _};
+use serde::Serialize;
+use videoforge_character::{CharacterManifest, PROVIDER_VOICEVOX};
 use videoforge_core::doctor::{self, CheckStatus, DoctorInput};
 use videoforge_core::export::{ExportRequest, ProjectExporter};
 use videoforge_core::preview::PreviewRenderer;
 use videoforge_core::progress::{FnProgress, GenerationStage};
 use videoforge_core::project::VideoProject;
-use videoforge_core::tts::{FakeTtsEngine, TtsCache, TtsEngine};
+use videoforge_core::tts::{FakeTtsEngine, Speaker, TtsCache, TtsEngine};
 use videoforge_core::{generate as core_generate, init as core_init, validate as core_validate};
 use videoforge_core::{AppError, CancellationToken, GenerateDeps, GenerateOptions, Workspace};
 use videoforge_export_ymm4::bundle::{create_bundle, BundleOptions};
@@ -514,4 +516,234 @@ pub fn bundle_ymm4(
         println!("  videoforge export ymm4 <bundle>/project.vfp.json");
     }
     exit(0)
+}
+
+// ---------------------------------------------------------------- character
+
+#[derive(Serialize)]
+struct CharacterVoiceReport {
+    provider: String,
+    speaker: String,
+    style: String,
+    /// Only filled by `character validate`, which has a TTS engine to ask.
+    resolved_speaker_id: Option<u32>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CharacterModelReport {
+    #[serde(rename = "type")]
+    model_type: String,
+    path: String,
+    resolved_path: PathBuf,
+    expressions: Vec<String>,
+    motions: Vec<String>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CharacterEntryReport {
+    id: String,
+    display_name: String,
+    voice: Option<CharacterVoiceReport>,
+    model: Option<CharacterModelReport>,
+    /// `false` if anything above failed. `character inspect` never checks
+    /// the voice against a live engine, so a character with no model is
+    /// always `ok` there even though `character validate` might still find
+    /// its voice unresolvable.
+    ok: bool,
+}
+
+/// Build one report per character: model file is always checked (offline,
+/// local file I/O); the voice is only checked against `tts` when given
+/// (`character validate`) — `character inspect` reports the voice as
+/// declared, unchecked.
+async fn build_character_reports(
+    manifest: &CharacterManifest,
+    manifest_dir: &Path,
+    tts: Option<&dyn TtsEngine>,
+) -> Vec<CharacterEntryReport> {
+    let mut speakers_cache: Option<anyhow::Result<Vec<Speaker>>> = None;
+    let mut out = Vec::with_capacity(manifest.characters.len());
+    for c in &manifest.characters {
+        let mut ok = true;
+
+        let voice = if let Some(v) = &c.voice {
+            let (resolved_speaker_id, error) = match tts {
+                None => (None, None),
+                Some(tts) => {
+                    if speakers_cache.is_none() {
+                        speakers_cache =
+                            Some(tts.list_speakers().await.map_err(anyhow::Error::from));
+                    }
+                    match speakers_cache.as_ref().unwrap() {
+                        Ok(speakers) => {
+                            let found = speakers
+                                .iter()
+                                .find(|s| s.name == v.speaker)
+                                .and_then(|s| s.styles.iter().find(|st| st.name == v.style));
+                            match found {
+                                Some(st) => (Some(st.id), None),
+                                None => (
+                                    None,
+                                    Some(format!(
+                                        "VOICEVOX has no speaker `{}` with style `{}`",
+                                        v.speaker, v.style
+                                    )),
+                                ),
+                            }
+                        }
+                        Err(e) => (None, Some(e.to_string())),
+                    }
+                }
+            };
+            if v.provider != PROVIDER_VOICEVOX || error.is_some() {
+                ok = false;
+            }
+            Some(CharacterVoiceReport {
+                provider: v.provider.clone(),
+                speaker: v.speaker.clone(),
+                style: v.style.clone(),
+                resolved_speaker_id,
+                error,
+            })
+        } else {
+            None
+        };
+
+        let model = if let Some(m) = &c.model {
+            let resolved_path = m.resolve_path(manifest_dir);
+            match videoforge_character::live2d::load_model3_json(&resolved_path) {
+                Ok(info) => Some(CharacterModelReport {
+                    model_type: m.model_type.clone(),
+                    path: m.path.clone(),
+                    resolved_path,
+                    expressions: info.expressions,
+                    motions: info.motions,
+                    error: None,
+                }),
+                Err(e) => {
+                    ok = false;
+                    Some(CharacterModelReport {
+                        model_type: m.model_type.clone(),
+                        path: m.path.clone(),
+                        resolved_path,
+                        expressions: Vec::new(),
+                        motions: Vec::new(),
+                        error: Some(e.to_string()),
+                    })
+                }
+            }
+        } else {
+            None
+        };
+
+        out.push(CharacterEntryReport {
+            id: c.id.clone(),
+            display_name: c.display_name.clone(),
+            voice,
+            model,
+            ok,
+        });
+    }
+    out
+}
+
+fn print_character_report(r: &CharacterEntryReport, checked: bool) {
+    let mark = if !checked {
+        " "
+    } else if r.ok {
+        "✓"
+    } else {
+        "✗"
+    };
+    println!();
+    println!("{mark} {}  ({})", r.display_name, r.id);
+    if let Some(v) = &r.voice {
+        match (&v.error, v.resolved_speaker_id) {
+            (Some(e), _) => println!("  voice: {}/{} — {e}", v.speaker, v.style),
+            (None, Some(id)) => {
+                println!("  voice: {}/{} -> speaker_id {id}", v.speaker, v.style)
+            }
+            (None, None) => println!("  voice: {} / {} / {}", v.provider, v.speaker, v.style),
+        }
+    }
+    if let Some(m) = &r.model {
+        println!("  model: {} at {}", m.model_type, m.resolved_path.display());
+        match &m.error {
+            Some(e) => println!("    ! {e}"),
+            None => {
+                let list = |v: &[String]| {
+                    if v.is_empty() {
+                        "(none declared)".to_string()
+                    } else {
+                        v.join(", ")
+                    }
+                };
+                println!("    expressions: {}", list(&m.expressions));
+                println!("    motions:     {}", list(&m.motions));
+            }
+        }
+    }
+}
+
+pub async fn character_inspect(ctx: &Context, manifest_path: PathBuf) -> anyhow::Result<ExitCode> {
+    let manifest = CharacterManifest::load(&manifest_path)
+        .with_context(|| format!("character manifest: {}", manifest_path.display()))?;
+    let manifest_dir = manifest_path.parent().unwrap_or(Path::new("."));
+    let reports = build_character_reports(&manifest, manifest_dir, None).await;
+
+    if ctx.json {
+        ctx.emit_json(&serde_json::json!({
+            "ok": true,
+            "manifest": manifest_path,
+            "characters": reports,
+        }))?;
+    } else {
+        println!("Manifest: {}", manifest_path.display());
+        for r in &reports {
+            print_character_report(r, false);
+        }
+    }
+    exit(0)
+}
+
+pub async fn character_validate(
+    ctx: &Context,
+    manifest_path: PathBuf,
+    fake_tts: bool,
+    endpoint: Option<String>,
+) -> anyhow::Result<ExitCode> {
+    let manifest = CharacterManifest::load(&manifest_path)
+        .with_context(|| format!("character manifest: {}", manifest_path.display()))?;
+    let manifest_dir = manifest_path.parent().unwrap_or(Path::new("."));
+
+    let cfg = ctx
+        .workspace_for(Some(&manifest_path))
+        .ok()
+        .and_then(|ws| ws.load_config().ok());
+    let endpoint = endpoint
+        .or_else(|| cfg.as_ref().map(|c| c.tts.endpoint.clone()))
+        .unwrap_or_else(|| videoforge_voicevox::DEFAULT_ENDPOINT.to_string());
+    let allow_remote = cfg.as_ref().is_some_and(|c| c.tts.allow_remote_endpoint);
+    let tts = make_tts(fake_tts, &endpoint, 30, allow_remote)?;
+
+    let reports = build_character_reports(&manifest, manifest_dir, Some(tts.as_ref())).await;
+    let ok = reports.iter().all(|r| r.ok);
+
+    if ctx.json {
+        ctx.emit_json(&serde_json::json!({
+            "ok": ok,
+            "manifest": manifest_path,
+            "characters": reports,
+        }))?;
+    } else {
+        println!("Manifest: {}", manifest_path.display());
+        for r in &reports {
+            print_character_report(r, true);
+        }
+        println!();
+        println!("{}", if ok { "OK" } else { "FAILED" });
+    }
+    exit(if ok { 0 } else { 2 })
 }

@@ -7,6 +7,13 @@ YMM4 editor projects. See `README.md` for the user-facing quick start and script
 `docs/design/mvp-v0.2-cross-platform.md` for the design. Module doc comments cite `§N` — those
 are headings in that design doc; look them up instead of guessing.
 
+A speaker can optionally link to a **character** (a VOICEVOX voice resolved by name, plus an
+optional Live2D model) for deterministic lip-sync data on the timeline — entirely additive, see
+`docs/character-system.md`. `docs/character-video-pipeline.md` and
+`docs/live2d-renderer-decision.md` cover the pipeline and the (not yet implemented) frame-rendering
+plan; `docs/character-licensing.md` tracks the unresolved licensing questions around any specific
+character/model a user configures.
+
 ## Commands
 
 ```bash
@@ -22,6 +29,7 @@ cargo test -p videoforge-project -- --nocapture
 # run the CLI without installing
 cargo run -p videoforge-cli -- doctor --fake-tts --json
 cargo run -p videoforge-cli -- generate scripts/sample.md --fake-tts --no-preview
+cargo run -p videoforge-cli -- character inspect fixtures/character/mock-character/manifest.yaml
 ```
 
 CI (`docs/ci/github-actions-ci.yml`, not yet under `.github/workflows/`) runs fmt → clippy →
@@ -135,6 +143,12 @@ These span files and are easy to break silently:
   drops `'` and `:`. Paths inside the graph stay relative to the project dir; only `preview.font`
   is absolute. `crates/videoforge-preview/tests/ffmpeg_real.rs` checks this against a real FFmpeg
   when one is on `PATH` (or `VIDEOFORGE_FFMPEG`) and skips otherwise.
+- **The character/Live2D feature is opt-in and additive.** `Config::character_manifest` /
+  `SpeakerConfig::character_id` are both `Option`; a workspace that sets neither runs through
+  every stage of `generate()` exactly as before (byte-for-byte — no new stage even runs). A
+  character's named VOICEVOX voice is resolved to a numeric `speaker_id` once, in
+  `core::character::resolve_character_voices`, *before* validation — `VoiceParams`, `TtsCache`,
+  and `TtsEngine` never see a name, only the resolved id, same as any hard-coded config.
 - **YMM4 export is a template patch, not a serializer.** The template `.ymmp` is an opaque
   `serde_json::Value`; the exporter clones items whose `Remark` starts with `VF_PROTO_` and writes
   only `Text` / `Frame` / `Length` / `FilePath` / `Remark` / `IsHidden`. Everything else is
@@ -154,3 +168,9 @@ These span files and are easy to break silently:
   under `.github/workflows/`. Enabling it is a `git mv` (see `docs/ci/README.md`).
 - The Tauri GUI (`apps/desktop`) builds and its command layer is unit-tested, but it has not been
   launched on a real Windows or macOS desktop; the checklist is in `apps/desktop/README.md`.
+- The character/Live2D pipeline (`docs/character-system.md`) stops at a `character_performance`
+  timeline track and a deterministic lip-sync file — no Live2D frame is ever rendered, `preview.mp4`
+  does not reflect a character at all yet, and there is no GUI wiring (CLI-only). The renderer
+  direction is decided but not built; see `docs/live2d-renderer-decision.md`. The manual procedure
+  (`docs/testing/character-manual-e2e.md`) has an empty results table — whoever runs it with a real
+  VOICEVOX character and Live2D model fills that in.

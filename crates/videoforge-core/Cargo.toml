@@ -11,6 +11,7 @@ videoforge-project = { workspace = true }
 videoforge-script = { workspace = true }
 videoforge-timeline = { workspace = true }
 videoforge-platform = { workspace = true }
+videoforge-character = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

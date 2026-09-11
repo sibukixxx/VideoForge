@@ -76,6 +76,12 @@ pub struct Config {
     pub preview: PreviewConfig,
     #[serde(default)]
     pub export: ExportConfig,
+    /// Workspace-relative path to a standalone `videoforge-character`
+    /// manifest (design §5). Optional: a workspace that never links a
+    /// speaker to a character (`SpeakerConfig::character_id`) needs nothing
+    /// here, and the whole character/Live2D pipeline is skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_manifest: Option<String>,
 }
 
 fn default_version() -> u32 {
@@ -221,6 +227,15 @@ pub struct SpeakerConfig {
     pub aliases: Vec<String>,
     #[serde(default)]
     pub voice: VoiceParams,
+    /// Links this speaker to an entry in `Config::character_manifest`
+    /// (design §5). When set and that character declares a `voice`, the
+    /// character's VOICEVOX speaker/style *name* is resolved to a numeric
+    /// `voice.speaker_id` at generate/doctor time instead of requiring one
+    /// to be hard-coded here (`core::character::resolve_character_voices`).
+    /// When absent, this speaker behaves exactly as before: a plain voice
+    /// with no character/Live2D performance data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -409,6 +424,26 @@ impl Config {
                 }
             }
             speaker.voice.validate(key).map_err(invalid)?;
+            if let Some(character_id) = &speaker.character_id {
+                if character_id.trim().is_empty() {
+                    return Err(invalid(format!(
+                        "speakers.{key}.character_id must not be empty"
+                    )));
+                }
+            }
+        }
+        if self.speakers.values().any(|s| s.character_id.is_some())
+            && self
+                .character_manifest
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default()
+                .is_empty()
+        {
+            return Err(invalid(
+                "a speaker sets character_id but no top-level character_manifest is configured"
+                    .into(),
+            ));
         }
         Ok(())
     }
@@ -486,6 +521,22 @@ speakers:
       pitch_scale: 0.0
       intonation_scale: 1.0
 
+# Optional: link a speaker to a character (design §5, `docs/character-system.md`).
+# The character manifest is a separate, reusable file — see
+# `videoforge character inspect <path>` — that names a VOICEVOX voice by
+# speaker/style *name* (resolved at generate/doctor time, never a hard-coded
+# id) and, optionally, a local Live2D model. Nothing below is required for a
+# plain voice-only speaker.
+# character_manifest: characters.yaml
+#
+#   tsumugi:
+#     aliases:
+#       - つむぎ
+#       - 春日部つむぎ
+#     character_id: tsumugi
+#     voice:
+#       speaker_id: 0   # ignored once character_id resolves a named voice
+
 preview:
   enabled: true
   # optional background image (workspace-relative); a flat color is used if missing
@@ -551,6 +602,39 @@ mod tests {
         );
         assert!(bad("version: 2\nspeakers:\n  a: {}\n").contains("version"));
         assert!(bad("unknown_key: 1\nspeakers:\n  a: {}\n").contains("unknown"));
+    }
+
+    #[test]
+    fn character_id_requires_a_character_manifest() {
+        let err = Config::parse(
+            "speakers:\n  a:\n    character_id: tsumugi\n",
+            Path::new("x.yaml"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("character_manifest"), "{err}");
+    }
+
+    #[test]
+    fn character_id_with_manifest_is_accepted() {
+        let cfg = Config::parse(
+            "character_manifest: characters.yaml\nspeakers:\n  a:\n    character_id: tsumugi\n",
+            Path::new("x.yaml"),
+        )
+        .unwrap();
+        assert_eq!(cfg.speakers["a"].character_id.as_deref(), Some("tsumugi"));
+        assert_eq!(cfg.character_manifest.as_deref(), Some("characters.yaml"));
+    }
+
+    #[test]
+    fn plain_speakers_do_not_need_a_character_manifest() {
+        // Existing configs with no character concept at all keep working
+        // exactly as before.
+        Config::parse(
+            "speakers:\n  a:\n    voice:\n      speaker_id: 1\n",
+            Path::new("x.yaml"),
+        )
+        .unwrap();
     }
 
     #[test]
