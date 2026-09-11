@@ -11,6 +11,7 @@ pub mod capabilities;
 pub mod character;
 pub mod config;
 pub mod directives;
+pub mod draft;
 pub mod doctor;
 pub mod error;
 pub mod export;

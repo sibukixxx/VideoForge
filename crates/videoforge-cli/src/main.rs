@@ -31,6 +31,11 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Prepare or review a source-grounded draft (external AI; no API calls)
+    Draft {
+        #[command(subcommand)]
+        action: DraftAction,
+    },
     /// Create a new workspace (videoforge.yaml, AGENTS.md, scripts/, assets/, templates/, generated/)
     Init {
         /// Directory to create (default: current directory)
@@ -103,6 +108,25 @@ enum CharacterTarget {
 }
 
 #[derive(Subcommand, Debug)]
+enum DraftAction {
+    /// Print the prompt containing your supplied sources for an external AI
+    Prompt { brief: String },
+    /// Validate an AI response and print the hash of the version to review
+    Check { brief: String, response: String },
+    /// Export only a reviewed, structurally valid version into scripts/
+    Export {
+        brief: String,
+        response: String,
+        #[arg(long)]
+        reviewed_hash: String,
+        #[arg(long)]
+        reviewer: String,
+        #[arg(long)]
+        out: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum ExportTarget {
     /// Materialize a YukkuriMovieMaker4 project (.ymmp). Windows only.
     Ymm4 {
@@ -163,6 +187,7 @@ async fn main() -> ExitCode {
         json: cli.json,
     };
     let result = match cli.command {
+        Command::Draft { action } => commands::draft(&ctx, action),
         Command::Init { dir, name } => commands::init(&ctx, dir, name),
         Command::Doctor(tts) => commands::doctor(&ctx, tts.fake_tts, tts.endpoint).await,
         Command::Validate { script } => commands::validate(&ctx, script),

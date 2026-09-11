@@ -62,6 +62,73 @@ fn exit(code: u8) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::from(code))
 }
 
+pub fn draft(ctx: &Context, action: crate::DraftAction) -> anyhow::Result<ExitCode> {
+    use std::io::{Read, Write};
+    use videoforge_core::draft::{self, Brief, Draft};
+    let ws = ctx.workspace_for(None)?;
+    let config = ws.load_config()?;
+    let brief_path = match &action {
+        crate::DraftAction::Prompt { brief }
+        | crate::DraftAction::Check { brief, .. }
+        | crate::DraftAction::Export { brief, .. } => brief,
+    };
+    let read = |path: &str| -> anyhow::Result<Vec<u8>> {
+        let path = ws.resolve(path)?;
+        let file = std::fs::File::open(&path).map_err(|e| AppError::read(&path, e))?;
+        let mut bytes = Vec::new();
+        file.take(1_000_001).read_to_end(&mut bytes)
+            .map_err(|e| AppError::read(&path, e))?;
+        if bytes.len() > 1_000_000 {
+            return Err(AppError::InvalidScript("draft input exceeds 1 MB".into()).into());
+        }
+        Ok(bytes)
+    };
+    let brief: Brief = serde_json::from_slice(&read(brief_path)?)
+        .map_err(|e| AppError::InvalidScript(e.to_string()))?;
+    let response = match &action {
+        crate::DraftAction::Prompt { .. } => {
+            let prompt = draft::prompt(&brief, &config)?;
+            if ctx.json {
+                ctx.emit_json(&serde_json::json!({"prompt": prompt}))?;
+            } else {
+                println!("{prompt}");
+            }
+            return exit(0);
+        }
+        crate::DraftAction::Check { response, .. }
+        | crate::DraftAction::Export { response, .. } => response,
+    };
+    let candidate: Draft = serde_json::from_slice(&read(response)?)
+        .map_err(|e| AppError::InvalidScript(e.to_string()))?;
+    let report = draft::check(&brief, &candidate, &config, &ws)?;
+    if let crate::DraftAction::Export { reviewed_hash, reviewer, out, .. } = action {
+        if !report.structurally_valid || reviewed_hash != report.review_hash
+            || reviewer.trim().is_empty() || reviewer.contains(['\n', '\r'])
+        {
+            ctx.emit_json(&report)?;
+            return exit(2);
+        }
+        if !out.starts_with("scripts/") || !out.ends_with(".md") {
+            return Err(AppError::InvalidScript("output must be scripts/*.md".into()).into());
+        }
+        let path = ws.resolve(&out)?;
+        // create_new refuses overwrite, including symlinks. No automatic generation.
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+            .open(&path).map_err(|e| AppError::write(&path, e))?;
+        let header = format!("# Reviewed draft: {} / {}\n\n", report.review_hash, reviewer);
+        // Header goes after front matter so the existing parser retains the title.
+        let markdown = report.markdown.replacen("---\n\n", &format!("---\n\n{header}"), 1);
+        file.write_all(markdown.as_bytes()).map_err(|e| AppError::write(&path, e))?;
+        ctx.emit_json(&serde_json::json!({
+            "ok": true, "script": out, "review_hash": report.review_hash,
+            "reviewer": reviewer, "generated": false,
+        }))?;
+        return exit(0);
+    }
+    ctx.emit_json(&report)?;
+    exit(if report.structurally_valid { 0 } else { 2 })
+}
+
 // ---------------------------------------------------------------- init
 
 pub fn init(ctx: &Context, dir: Option<PathBuf>, name: Option<String>) -> anyhow::Result<ExitCode> {
