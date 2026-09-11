@@ -15,6 +15,7 @@ pub mod path;
 pub mod presentation;
 pub mod project;
 pub mod time;
+pub mod validation;
 
 pub use path::{PathError, RelativeAssetPath};
 pub use presentation::{Presentation, KNOWN_INTENTS, KNOWN_ROLES};
@@ -24,3 +25,6 @@ pub use project::{
     VideoSettings, SCHEMA_VERSION,
 };
 pub use time::{format_srt_timestamp, format_timespan, frame_to_millis, millis_to_frame};
+pub use validation::{
+    validate_project, ProjectValidationIssue, ProjectValidationReport, ValidationSeverity,
+};

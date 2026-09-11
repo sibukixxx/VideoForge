@@ -4,7 +4,10 @@
 //! delegates, and encodes so native and browser runtimes cannot drift.
 
 use serde::{Deserialize, Serialize};
-use videoforge_project::{RelativeAssetPath, Track};
+use videoforge_project::{
+    validate_project, ProjectValidationIssue, ProjectValidationReport, RelativeAssetPath, Track,
+    ValidationSeverity, VideoProject,
+};
 use videoforge_timeline::{
     place_visual_events, schedule, DialogueInput, ScheduledDialogue, TimelineOptions, VisualEvent,
 };
@@ -90,6 +93,24 @@ pub fn calculate_visual_timeline_json(input: &str) -> Result<String, String> {
     .map_err(|error| format!("failed to encode result: {error}"))
 }
 
+/// Parse and validate a canonical VideoProject, returning a structured report.
+pub fn validate_video_project_json(input: &str) -> Result<String, String> {
+    let report = match VideoProject::from_json(input) {
+        Ok(project) => validate_project(&project),
+        Err(error) => ProjectValidationReport {
+            errors: vec![ProjectValidationIssue {
+                severity: ValidationSeverity::Error,
+                code: "invalid_project_json".into(),
+                path: "$".into(),
+                message: error.to_string(),
+            }],
+            warnings: Vec::new(),
+        },
+    };
+    serde_json::to_string(&report)
+        .map_err(|error| format!("failed to encode validation report: {error}"))
+}
+
 fn decode_dialogues(dialogues: Vec<DialogueRequest>) -> Result<Vec<DialogueInput>, String> {
     dialogues
         .into_iter()
@@ -122,6 +143,12 @@ mod browser {
     #[wasm_bindgen]
     pub fn calculate_visual_timeline(input: &str) -> Result<String, JsValue> {
         super::calculate_visual_timeline_json(input).map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Validate the canonical VideoProject IR without runtime or filesystem access.
+    #[wasm_bindgen]
+    pub fn validate_video_project(input: &str) -> Result<String, JsValue> {
+        super::validate_video_project_json(input).map_err(|error| JsValue::from_str(&error))
     }
 }
 
@@ -191,5 +218,32 @@ mod tests {
         assert!(calculate_visual_timeline_json(input)
             .unwrap_err()
             .contains("does not exist"));
+    }
+
+    #[test]
+    fn project_validation_fixtures_have_stable_structured_results() {
+        for (input, expected) in [
+            (
+                include_str!("../../../fixtures/micro-wasm/project-valid.input.json"),
+                include_str!("../../../fixtures/micro-wasm/project-valid.expected.json"),
+            ),
+            (
+                include_str!("../../../fixtures/micro-wasm/project-invalid.input.json"),
+                include_str!("../../../fixtures/micro-wasm/project-invalid.expected.json"),
+            ),
+        ] {
+            let actual: serde_json::Value =
+                serde_json::from_str(&validate_video_project_json(input).unwrap()).unwrap();
+            let expected: serde_json::Value = serde_json::from_str(expected).unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn malformed_project_is_a_report_not_a_wasm_boundary_failure() {
+        let report: ProjectValidationReport =
+            serde_json::from_str(&validate_video_project_json("not json").unwrap()).unwrap();
+        assert_eq!(report.errors[0].code, "invalid_project_json");
+        assert_eq!(report.errors[0].path, "$");
     }
 }

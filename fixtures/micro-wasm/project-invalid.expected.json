@@ -1,0 +1,12 @@
+{
+  "errors": [
+    {"severity": "error", "code": "zero_video_setting", "path": "$.video.fps", "message": "video fps must be greater than zero"},
+    {"severity": "error", "code": "duplicate_track_id", "path": "$.tracks[1].id", "message": "track id `media` is duplicated"},
+    {"severity": "error", "code": "duplicate_clip_id", "path": "$.tracks[1].clips[0].id", "message": "clip id `duplicate` is already used at $.tracks[0].clips[0]"},
+    {"severity": "error", "code": "track_clip_kind_mismatch", "path": "$.tracks[1].clips[0].type", "message": "clip type `caption` does not match track kind `audio`"},
+    {"severity": "error", "code": "zero_clip_duration", "path": "$.tracks[1].clips[0].duration_ms", "message": "clip duration must be greater than zero"}
+  ],
+  "warnings": [
+    {"severity": "warning", "code": "caption_without_matching_audio", "path": "$.tracks[1].clips[0]", "message": "caption `duplicate` has no audio with the same speaker and timing"}
+  ]
+}

@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import init, { calculate_timeline, calculate_visual_timeline } from "../pkg/videoforge_timeline_wasm.js";
+import init, { calculate_timeline, calculate_visual_timeline, validate_video_project } from "../pkg/videoforge_timeline_wasm.js";
 
 const input = await readFile(new URL("../../../fixtures/micro-wasm/simple.input.json", import.meta.url), "utf8");
 const expected = JSON.parse(await readFile(new URL("../../../fixtures/micro-wasm/simple.expected.json", import.meta.url), "utf8"));
@@ -20,3 +20,14 @@ if (JSON.stringify(visualActual) !== JSON.stringify(visualExpected)) {
   process.exit(1);
 }
 console.log("PASS: Wasm visual placement matches the native expected fixture");
+
+for (const name of ["project-valid", "project-invalid"]) {
+  const project = await readFile(new URL(`../../../fixtures/micro-wasm/${name}.input.json`, import.meta.url), "utf8");
+  const projectExpected = JSON.parse(await readFile(new URL(`../../../fixtures/micro-wasm/${name}.expected.json`, import.meta.url), "utf8"));
+  const projectActual = JSON.parse(validate_video_project(project));
+  if (JSON.stringify(projectActual) !== JSON.stringify(projectExpected)) {
+    console.error(`Wasm project validation differs for ${name}`, { projectExpected, projectActual });
+    process.exit(1);
+  }
+}
+console.log("PASS: Wasm VideoProject validation matches native expected fixtures");

@@ -138,7 +138,7 @@ timeline end, and a sound effect clipped at the timeline boundary.
 |---|---|---|
 | P0 | Dialogue timeline scheduling | Safest existing pure function; shared today |
 | Implemented P1 | Batch visual clip placement | Reuses the existing pure function in one boundary crossing |
-| P1 | VideoProject validation | Preserves one rule set across desktop/browser; design a structured error contract first |
+| Implemented P1 | VideoProject validation | Structured errors/warnings shared across desktop/browser |
 | P1 | Subtitle timing/layout preparation | Browser preview use case; keep SRT file output outside Wasm |
 | P2 | Waveform analysis | Strong compute/Worker fit, but requires a stable PCM input contract and benchmarks |
 | P2 | Image dimension/layout calculation | Useful for preview; define pixel/fit semantics first |
@@ -157,8 +157,11 @@ project shows visible blocking; Worker startup and message serialization would o
 overhead than they remove.
 
 Phase 0/P1's likely value is eliminating duplicate business rules, not making a short timeline
-faster. Further P1 work should stop until local measurements are available; the next candidate must
-have a concrete browser-facing need or a larger batch hot path.
+faster. The validation addition checks zero video settings, duplicate IDs, track/clip kind mismatch,
+zero duration, time overflow, caption/audio timing correspondence, and visuals extending beyond the
+dialogue timeline. Parse failures and semantic findings use a stable structured report. Further Wasm
+work should stop until local measurements are available; the next candidate must have a concrete
+browser-facing need or a larger batch hot path.
 
 ## Local verification while CI is unavailable
 

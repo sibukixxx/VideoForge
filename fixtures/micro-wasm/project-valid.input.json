@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "sample",
+  "title": "Sample",
+  "video": {"width": 1920, "height": 1080, "fps": 30},
+  "source": {"script": "scripts/sample.md"},
+  "tracks": [
+    {"id": "audio", "kind": "audio", "clips": [
+      {"type": "audio", "id": "audio-001", "source": "assets/audio/001.wav", "start_ms": 0, "duration_ms": 1000, "speaker": "reimu"}
+    ]},
+    {"id": "caption", "kind": "caption", "clips": [
+      {"type": "caption", "id": "caption-001", "text": "こんにちは", "start_ms": 0, "duration_ms": 1000, "speaker": "reimu", "speaker_display": "霊夢"}
+    ]}
+  ]
+}
