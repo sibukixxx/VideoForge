@@ -1,0 +1,7 @@
+{
+  "dialogue_gap_ms": 200,
+  "dialogues": [
+    {"index": 1, "speaker": "reimu", "speaker_display": "霊夢", "text": "こんにちは", "audio": "assets/audio/001.wav", "duration_ms": 1000},
+    {"index": 2, "speaker": "reimu", "speaker_display": "霊夢", "text": "短い字幕です", "audio": "assets/audio/002.wav", "duration_ms": 800}
+  ]
+}

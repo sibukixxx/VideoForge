@@ -1,0 +1,7 @@
+{
+  "dialogue_gap_ms": 0,
+  "dialogues": [
+    {"index": 1, "speaker": "speaker-a", "speaker_display": "話者A", "text": "🎬境界", "audio": "assets/audio/very-short.wav", "duration_ms": 1},
+    {"index": 2, "speaker": "speaker-b", "speaker_display": "話者B", "text": "改行\nとUnicode：髙", "audio": "assets/audio/unicode.wav", "duration_ms": 2}
+  ]
+}
