@@ -1,24 +1,10 @@
-name: Micro-Wasm Phase 0
+name: Micro-Wasm Phase 0 and P1
 
+# Parked while GitHub Actions is unavailable. Copy this file to
+# .github/workflows/micro-wasm.yml when CI can run again.
 on:
   push:
-    paths:
-      - "crates/videoforge-timeline/**"
-      - "crates/videoforge-timeline-wasm/**"
-      - "experiments/micro-wasm/**"
-      - "fixtures/micro-wasm/**"
-      - ".github/workflows/micro-wasm.yml"
-      - "Cargo.toml"
-      - "Cargo.lock"
   pull_request:
-    paths:
-      - "crates/videoforge-timeline/**"
-      - "crates/videoforge-timeline-wasm/**"
-      - "experiments/micro-wasm/**"
-      - "fixtures/micro-wasm/**"
-      - ".github/workflows/micro-wasm.yml"
-      - "Cargo.toml"
-      - "Cargo.lock"
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,7 +19,9 @@ jobs:
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@wasm-pack
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
       - name: Rust quality gates
         run: |
           cargo fmt --all --check
@@ -54,7 +42,7 @@ jobs:
           npm run benchmark | tee /tmp/wasm-js-benchmark.txt
           npm run size | tee /tmp/wasm-size.json
           {
-            echo '## Micro-Wasm Phase 0 measurements'
+            echo '## Micro-Wasm measurements'
             echo '```text'
             cat /tmp/native-benchmark.txt
             cat /tmp/wasm-js-benchmark.txt

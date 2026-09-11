@@ -40,11 +40,17 @@ The dependency survey found:
 | YMM4 export/bundle | Filesystem + Windows/editor contract | Excluded |
 | desktop commands | Tauri + OS composition root | Excluded |
 
-## 4. Selected Phase 0 hot path
+## 4. Selected Phase 0 hot path and cautious P1 extension
 
 Phase 0 exposes dialogue timeline scheduling: ordered dialogue durations plus a gap become stable
 start/end times. This is already the pure `videoforge_timeline::schedule` function used by native
 project generation. No scheduling algorithm was copied into the Wasm crate.
+
+P1 adds visual clip placement for image, character, BGM, and sound-effect events. The existing
+`videoforge_timeline::place_visual_events` function was made public and remains the only
+implementation used by both `build` and Wasm. A second adapter schedules dialogues and places all
+visual events in one call, avoiding a chain of small Wasm boundary crossings. The P0 endpoint stays
+compatible.
 
 ## 5. Native/Wasm shared-core architecture
 
@@ -60,11 +66,18 @@ videoforge-timeline::schedule
 `calculate_timeline_json` function performs boundary conversion and delegates to `schedule`.
 Only a `#[wasm_bindgen]` function is target-gated for `wasm32`.
 
+The P1 path delegates to both `schedule` and `place_visual_events`; neither algorithm lives in the
+adapter.
+
 ## 6. Wasm boundary
 
 Input is a small JSON object containing `dialogue_gap_ms` and dialogue metadata (`index`, speaker,
 display name, text, workspace-relative audio path, duration). Output contains scheduled dialogue
 metadata and `total_duration_ms`. Paths are validated with the existing `RelativeAssetPath` type.
+
+The optional `visual_events` array uses the existing `VisualEvent` representation. The P1 endpoint
+returns only calculated visual tracks alongside dialogue timing; it does not create, load, save, or
+mutate `project.vfp.json`.
 
 The boundary deliberately contains no complete filesystem object and does not mutate a
 VideoProject. The canonical IR schema is unchanged. JSON was chosen for a transparent Phase 0
@@ -107,7 +120,9 @@ npm run serve
 
 The page loads the Simple fixture, executes Wasm, compares with the expected result shared by the
 native test, and prints the JSON. `npm run smoke` performs the same parity check headlessly in CI.
-The fixture set covers Simple, Multi Clip, and Edge Case (1 ms, zero gap, Japanese and Unicode).
+The fixture set covers Simple, Multi Clip, Edge Case (1 ms, zero gap, Japanese and Unicode), and P1
+Visual Placement. The latter covers image switching, same-speaker character switching, BGM to the
+timeline end, and a sound effect clipped at the timeline boundary.
 
 ## 10. Limitations
 
@@ -122,7 +137,7 @@ The fixture set covers Simple, Multi Clip, and Edge Case (1 ms, zero gap, Japane
 | Priority | Candidate | Reason / gate |
 |---|---|---|
 | P0 | Dialogue timeline scheduling | Safest existing pure function; shared today |
-| P1 | Batch visual clip placement | Pure, browser-useful, enough work per boundary crossing |
+| Implemented P1 | Batch visual clip placement | Reuses the existing pure function in one boundary crossing |
 | P1 | VideoProject validation | Preserves one rule set across desktop/browser; design a structured error contract first |
 | P1 | Subtitle timing/layout preparation | Browser preview use case; keep SRT file output outside Wasm |
 | P2 | Waveform analysis | Strong compute/Worker fit, but requires a stable PCM input contract and benchmarks |
@@ -141,6 +156,18 @@ candidates. Timeline scheduling is fast and can remain on the main thread unless
 project shows visible blocking; Worker startup and message serialization would otherwise add more
 overhead than they remove.
 
-Phase 0's likely value is eliminating duplicate business rules, not making two-dialogue scheduling
-faster. Continue to P1 only for a browser-facing need or a larger batch hot path where sharing and/or
-compute gains outweigh bundle and boundary costs.
+Phase 0/P1's likely value is eliminating duplicate business rules, not making a short timeline
+faster. Further P1 work should stop until local measurements are available; the next candidate must
+have a concrete browser-facing need or a larger batch hot path.
+
+## Local verification while CI is unavailable
+
+GitHub Actions is intentionally parked at `docs/ci/micro-wasm.yml` so it does not create permanent
+red checks while runners are unavailable. On a machine with Rust, Node, and `wasm-pack`, run:
+
+```bash
+./scripts/verify-micro-wasm.sh
+```
+
+Do not merge based only on compilation plausibility. Record the command output and measured sizes
+before enabling another Wasm candidate.

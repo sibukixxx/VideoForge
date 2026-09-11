@@ -1,0 +1,16 @@
+{
+  "dialogue_gap_ms": 200,
+  "dialogues": [
+    {"index": 1, "speaker": "reimu", "speaker_display": "霊夢", "text": "画像を表示", "audio": "assets/audio/001.wav", "duration_ms": 1000},
+    {"index": 2, "speaker": "marisa", "speaker_display": "魔理沙", "text": "次の会話", "audio": "assets/audio/002.wav", "duration_ms": 1000},
+    {"index": 3, "speaker": "reimu", "speaker_display": "霊夢", "text": "画像を切替", "audio": "assets/audio/003.wav", "duration_ms": 1000}
+  ],
+  "visual_events": [
+    {"anchor_dialogue_index": 1, "duration_ms": null, "kind": {"type": "image", "source": "assets/image/a.png", "transform": {}, "presentation": null}},
+    {"anchor_dialogue_index": 1, "duration_ms": null, "kind": {"type": "character", "speaker": "reimu", "source": "assets/character/reimu/default.png", "transform": {}, "presentation": null}},
+    {"anchor_dialogue_index": 1, "duration_ms": null, "kind": {"type": "bgm", "source": "assets/bgm/main.mp3", "volume": 0.6, "looping": true}},
+    {"anchor_dialogue_index": 3, "duration_ms": null, "kind": {"type": "image", "source": "assets/image/b.png", "transform": {}, "presentation": null}},
+    {"anchor_dialogue_index": 3, "duration_ms": null, "kind": {"type": "character", "speaker": "reimu", "source": "assets/character/reimu/happy.png", "transform": {}, "presentation": null}},
+    {"anchor_dialogue_index": 3, "duration_ms": null, "kind": {"type": "sound_effect", "source": "assets/se/pop.wav", "volume": 1.0}}
+  ]
+}

@@ -1,10 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
-import init, { calculate_timeline } from "../pkg/videoforge_timeline_wasm.js";
+import init, { calculate_timeline, calculate_visual_timeline } from "../pkg/videoforge_timeline_wasm.js";
 import { calculateTimelineJs } from "../src/js-scheduler.js";
 
 const input = await readFile(new URL("../../../fixtures/micro-wasm/multi-clip.input.json", import.meta.url), "utf8");
 const wasm = await readFile(new URL("../pkg/videoforge_timeline_wasm_bg.wasm", import.meta.url));
+const visualInput = await readFile(new URL("../../../fixtures/micro-wasm/visual-placement.input.json", import.meta.url), "utf8");
 const initStart = performance.now();
 await init(wasm);
 const initMs = performance.now() - initStart;
@@ -21,4 +22,5 @@ console.log(`Wasm initialization: ${initMs.toFixed(3)} ms`);
 for (const iterations of [1, 100, 1_000, 10_000]) {
   measure("Wasm", () => calculate_timeline(input), iterations);
   measure("JS", () => calculateTimelineJs(input), iterations);
+  measure("Visual Wasm", () => calculate_visual_timeline(visualInput), iterations);
 }
