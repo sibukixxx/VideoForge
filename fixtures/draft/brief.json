@@ -1,0 +1,12 @@
+{
+  "topic": "テスト用動画制作の流れ",
+  "audience": "初心者",
+  "target_seconds": 10,
+  "sources": [{
+    "id": "S1",
+    "locator": "synthetic:workflow",
+    "published_at": "unknown",
+    "checked_at": "2026-09-11",
+    "text": "これは合成テスト資料です。台本を確認してから音声を作ります。字幕と音声の時刻を合わせます。"
+  }]
+}

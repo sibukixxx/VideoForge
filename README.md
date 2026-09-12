@@ -69,6 +69,11 @@ VOICEVOX / FFmpeg なしで配管だけ試す: `videoforge generate scripts/samp
 
 ## 台本フォーマット
 
+資料からAIで台本案を作る半自動P0は
+[`docs/script-draft-p0.md`](docs/script-draft-p0.md) を参照。
+`draft prompt` → 外部AI → `draft check` → 人間の確認 → `draft export`。
+API接続・自動公開は行いません。
+
 ```markdown
 ---
 title: 半年前、AIエージェントはまだ苦戦していた
