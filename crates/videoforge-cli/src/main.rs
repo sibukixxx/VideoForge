@@ -4,6 +4,7 @@
 //! Exit codes: 0 ok · 1 error · 2 validation failed / doctor failures.
 
 mod commands;
+mod interchange_commands;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -145,6 +146,18 @@ enum ExportTarget {
         #[arg(long, hide = true)]
         force: bool,
     },
+    /// Export Final Cut Pro XML for handoff to Final Cut Pro / compatible NLEs
+    Fcpxml {
+        project: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Export OpenTimelineIO JSON for NLE-agnostic interchange and automation
+    Otio {
+        project: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -224,6 +237,12 @@ async fn main() -> ExitCode {
                     force,
                 },
         } => commands::export_ymm4(&ctx, project, template, out, open, force).await,
+        Command::Export {
+            target: ExportTarget::Fcpxml { project, out },
+        } => interchange_commands::export(project, out, "fcpxml", ctx.json).await,
+        Command::Export {
+            target: ExportTarget::Otio { project, out },
+        } => interchange_commands::export(project, out, "otio", ctx.json).await,
         Command::Bundle {
             target:
                 BundleTarget::Ymm4 {

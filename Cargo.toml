@@ -11,11 +11,9 @@ members = [
     "crates/videoforge-voicevox",
     "crates/videoforge-preview",
     "crates/videoforge-export-ymm4",
+    "crates/videoforge-export-interchange",
     "crates/videoforge-cli",
 ]
-# The desktop app is its own cargo workspace (apps/desktop/src-tauri/Cargo.toml):
-# `tauri` needs WebKitGTK/GTK on Linux and would drag that into the offline
-# `cargo test --workspace`. Build it with `pnpm tauri build` from apps/desktop.
 exclude = ["apps/desktop/src-tauri"]
 
 [workspace.package]
@@ -35,6 +33,7 @@ videoforge-core = { path = "crates/videoforge-core" }
 videoforge-voicevox = { path = "crates/videoforge-voicevox" }
 videoforge-preview = { path = "crates/videoforge-preview" }
 videoforge-export-ymm4 = { path = "crates/videoforge-export-ymm4" }
+videoforge-export-interchange = { path = "crates/videoforge-export-interchange" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

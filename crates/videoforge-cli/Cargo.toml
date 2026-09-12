@@ -15,6 +15,7 @@ videoforge-core = { workspace = true }
 videoforge-voicevox = { workspace = true }
 videoforge-preview = { workspace = true }
 videoforge-export-ymm4 = { workspace = true }
+videoforge-export-interchange = { workspace = true }
 videoforge-platform = { workspace = true }
 videoforge-character = { workspace = true }
 clap = { workspace = true }
