@@ -125,6 +125,29 @@ Pan/zoom (`crop=...:eval=frame` referencing `t`, not the `zoompan` filter — se
 own `"fade"` only ramps its own alpha at its own boundaries, not a coordinated dissolve with its
 neighbor) — "don't build a complex editor" per the P1-5 brief.
 
+### Subtitle engine (P1-3)
+
+Caption styling is one config struct, `config::SubtitleConfig` (`videoforge.yaml`'s
+`preview.subtitle`), threaded into the renderer as `PreviewRequest::subtitle` and stored on
+`RenderPlan` — there is no separate "subtitle engine" module, just parameters the existing caption
+`drawtext` chain (unchanged since P0) now reads instead of hard-coding. `position` (`bottom`/`top`)
+picks which frame edge captions anchor to; `margin_fraction` replaced the `0.20`-of-height constant
+that used to be baked into `caption_safe_area_px`/the `y=` expressions, so both the caption text and
+the character-overlay clamp (`overlay_position_exprs`) move together — a `top`-anchored caption
+flips the character clamp to a *minimum* `y` (stay below the top safe area) instead of a maximum
+(stay above the bottom one), so a character can never be placed under captions on either edge.
+`font_color`/`outline_color`/`outline_width`/`background`/`background_color`/`font_scale` map
+directly onto `drawtext`'s `fontcolor`/`bordercolor`/`borderw`/optional `box=1:boxcolor=.../
+boxborderw=10`/font-size multiplier; `font_scale` also shrinks `max_chars_per_line`'s wrap width so
+long lines still fit. Per-speaker color (`SpeakerConfig::caption_color`) is resolved once at
+`DialogueInput` construction time in `core::generate` — the same "resolve early, bake into the IR"
+pattern P0's character voice resolution established — landing on `CaptionClip::color`; a caption
+with no override falls back to `subtitle.font_color` in `RenderPlan::build`. The speaker-name label
+above the caption text keeps its own always-on box (a "chip"), independent of
+`subtitle.background`, which only toggles a box behind the caption text itself.
+`buildcache::preview_fingerprint` hashes `SubtitleConfig`'s `Debug` output too, so a subtitle-only
+config edit invalidates the incremental-build cache (P0-4) the same as a background-color change.
+
 ### Audio engine (P1-4)
 
 `RenderPlan::audio_filter` mixes three independent groups of FFmpeg audio inputs — dialogue (as
@@ -229,6 +252,15 @@ These span files and are easy to break silently:
   other clip authored by hand. BGM ducking's `BGM_DUCK_VOLUME` is a single global constant, not a
   per-clip or per-config value, and has not been checked against a real FFmpeg render (command-
   builder-tested only, same caveat as the rest of this list).
+- The subtitle engine (P1-3) is command-builder-tested only, same caveat as the rest of this list —
+  `subtitle.position: top` in particular has not been rendered through a real FFmpeg. Line wrapping
+  (`wrap_text`) is still a naive fixed-character-count hard-wrap (CJK-appropriate, since every glyph
+  is ~1em; a long unbroken Latin word is not treated specially). There is no automatic shrink-to-fit
+  for a caption that is long even after wrapping — an author who sets an extreme `font_scale` or
+  writes a very long line can still push text off the safe area horizontally (only the vertical
+  safe-area/character-overlap axis is structurally enforced). Per-speaker styling (P1-3's
+  "speaker-style") covers only caption text color (`SpeakerConfig::caption_color`); font/size/
+  outline/background remain global (`preview.subtitle`), not per-speaker.
 - The CI workflow is parked in `docs/ci/` because the authoring session could not create files
   under `.github/workflows/`. Enabling it is a `git mv` (see `docs/ci/README.md`).
 - The Tauri GUI (`apps/desktop`) builds and its command layer is unit-tested, but it has not been

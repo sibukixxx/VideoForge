@@ -251,6 +251,10 @@ async fn run_pipeline(
             text: s.text.clone(),
             audio: rel,
             duration_ms: s.duration_ms,
+            caption_color: config
+                .speakers
+                .get(&s.speaker_key)
+                .and_then(|sc| sc.caption_color.clone()),
         });
     }
 
@@ -430,6 +434,7 @@ async fn run_pipeline(
                         &project_json,
                         font.as_deref(),
                         &config.preview.background_color,
+                        &config.preview.subtitle,
                         renderer.id(),
                     );
                     // P0-4: reuse the previous generate's preview.mp4 when
@@ -456,6 +461,7 @@ async fn run_pipeline(
                                 output: &output,
                                 font: font.as_deref(),
                                 background_color: &config.preview.background_color,
+                                subtitle: &config.preview.subtitle,
                                 character_sprites: &character_sprites,
                                 cancel: cancel.clone(),
                             })

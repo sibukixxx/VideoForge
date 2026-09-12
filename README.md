@@ -32,6 +32,7 @@ MVP v0.1 の **Core + CLI**（設計書 Phase 1〜6）と Tauri GUI MVP（Phase 
 | Timeline / SRT（directive → clip 配置を含む） | ✅ |
 | FFmpeg preview（背景 + 音声配置 + 字幕 + speaker 名 + fade + Image/Character立ち絵/Video合成 + crop/fit/rotation/opacity + fade/pan/zoom transition + on-screen Text）(P1-1/P1-2/P1-5) | ✅ command builder + filtergraph escaping はテスト済。実 FFmpeg の統合テストは ffmpeg が見つかった時だけ実行（`docs/testing/ffmpeg-path-escaping.md`）。pan/zoom は実FFmpegでの検証は未実施 |
 | Audio Engine（Dialogue / BGM / SE を `amix` で合成、BGM の volume/loop/trim/fade-in-out/normalize、**Dialogue 発話区間での BGM ducking**）(P1-4) | ✅ command builder テスト済。Video clip 自身の音声トラックは未合成（次の課題） |
+| Subtitle Engine（`preview.subtitle`: position top/bottom・margin・font/outline color・outline width・background box・font_scale、話者別 `caption_color`、字幕と立ち絵の安全領域はどちらの edge でも共有）(P1-3) | ✅ command builder テスト済。`position: top` は実 FFmpeg 未検証。行の折返しは固定文字数の hard-wrap（CJK 前提） |
 | YMM4 exporter（Template Patch 方式、Windows path materialize、Windows 限定） | ✅ 合成 fixture でテスト済。**実 YMM4 template での Phase 0 検証は未実施** |
 | Handoff bundle（dir + zip） | ✅ |
 | Tauri GUI（`apps/desktop`: Workspace / Script / Validate / Generate + 進捗 / Preview / Doctor / YMM4 export or bundle） | ✅ MVP。実機での起動確認は `apps/desktop/README.md` のチェックリスト |

@@ -220,6 +220,12 @@ pub struct CaptionClip {
     /// Display name as written in the script (e.g. `霊夢`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker_display: Option<String>,
+    /// Per-speaker caption color override (P1-3, `SpeakerConfig::caption_color`),
+    /// resolved once at generate time — same "resolve early, bake into the
+    /// IR" pattern as a character's named VOICEVOX voice. `None` falls back
+    /// to `preview.subtitle.font_color` at render time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -715,6 +721,7 @@ mod tests {
                 duration_ms: 3410,
                 speaker: "reimu".into(),
                 speaker_display: Some("霊夢".into()),
+                color: None,
                 extra: BTreeMap::new(),
             })],
         });

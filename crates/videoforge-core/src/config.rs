@@ -35,6 +35,13 @@ const PITCH_SCALE_RANGE: (f32, f32) = (-0.15, 0.15);
 const INTONATION_SCALE_RANGE: (f32, f32) = (0.0, 2.0);
 const VOLUME_SCALE_RANGE: (f32, f32) = (0.0, 2.0);
 
+// A margin past half the frame would leave no room for caption text at all;
+// a font scale below/above these bounds is almost certainly a typo rather
+// than an intentional micro/giant caption.
+const SUBTITLE_MARGIN_FRACTION_RANGE: (f32, f32) = (0.0, 0.45);
+const SUBTITLE_FONT_SCALE_RANGE: (f32, f32) = (0.3, 3.0);
+const MAX_SUBTITLE_OUTLINE_WIDTH: u32 = 20;
+
 /// Inclusive bounds check that names the offending field.
 fn check_range<T>(field: &str, value: T, min: T, max: T) -> Result<(), String>
 where
@@ -236,6 +243,11 @@ pub struct SpeakerConfig {
     /// with no character/Live2D performance data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character_id: Option<String>,
+    /// Per-speaker caption text color override (P1-3), e.g. to give each
+    /// character a distinct subtitle color. Falls back to
+    /// `preview.subtitle.font_color` when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption_color: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -304,6 +316,10 @@ pub struct PreviewConfig {
     /// Background color used when no image is available (hex, e.g. `#1e1e2e`).
     #[serde(default = "d_bg_color")]
     pub background_color: String,
+    /// Caption/subtitle styling (P1-3): position, margin, colors, outline,
+    /// background box. Per-speaker color overrides live on `SpeakerConfig`.
+    #[serde(default)]
+    pub subtitle: SubtitleConfig,
 }
 fn yes() -> bool {
     true
@@ -318,6 +334,82 @@ impl Default for PreviewConfig {
             background: None,
             font: None,
             background_color: d_bg_color(),
+            subtitle: SubtitleConfig::default(),
+        }
+    }
+}
+
+/// Which edge of the frame captions are anchored to. Whichever edge is
+/// chosen also becomes the character-overlay "safe area" edge
+/// (`videoforge_core::preview::SubtitleStyle` / `caption_safe_area_px` in
+/// `videoforge-preview`), so a character can never be placed under the
+/// captions regardless of which edge they render from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SubtitlePosition {
+    #[default]
+    Bottom,
+    Top,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubtitleConfig {
+    #[serde(default)]
+    pub position: SubtitlePosition,
+    /// Fraction of frame height reserved as margin between the chosen edge
+    /// and the caption text's baseline (same role `0.20` played as a
+    /// hard-coded constant before P1-3).
+    #[serde(default = "d_subtitle_margin_fraction")]
+    pub margin_fraction: f32,
+    /// Default caption text color (hex or FFmpeg color name); overridden
+    /// per-speaker by `SpeakerConfig::caption_color`.
+    #[serde(default = "d_subtitle_font_color")]
+    pub font_color: String,
+    #[serde(default = "d_subtitle_outline_color")]
+    pub outline_color: String,
+    #[serde(default = "d_subtitle_outline_width")]
+    pub outline_width: u32,
+    /// Draw a solid box behind the caption text itself (the speaker-name
+    /// label above it always has one).
+    #[serde(default)]
+    pub background: bool,
+    #[serde(default = "d_subtitle_background_color")]
+    pub background_color: String,
+    /// Multiplies the frame-height-relative base font size; also scales the
+    /// wrap width so long lines still fit.
+    #[serde(default = "one_f32")]
+    pub font_scale: f32,
+}
+fn d_subtitle_margin_fraction() -> f32 {
+    0.20
+}
+fn d_subtitle_font_color() -> String {
+    "white".into()
+}
+fn d_subtitle_outline_color() -> String {
+    "black".into()
+}
+fn d_subtitle_outline_width() -> u32 {
+    3
+}
+fn d_subtitle_background_color() -> String {
+    "0x000000AA".into()
+}
+fn one_f32() -> f32 {
+    1.0
+}
+impl Default for SubtitleConfig {
+    fn default() -> Self {
+        Self {
+            position: SubtitlePosition::default(),
+            margin_fraction: d_subtitle_margin_fraction(),
+            font_color: d_subtitle_font_color(),
+            outline_color: d_subtitle_outline_color(),
+            outline_width: d_subtitle_outline_width(),
+            background: false,
+            background_color: d_subtitle_background_color(),
+            font_scale: one_f32(),
         }
     }
 }
@@ -402,6 +494,25 @@ impl Config {
         if let Err(e) = check_endpoint_allowed(&self.tts.endpoint, self.tts.allow_remote_endpoint) {
             return Err(invalid(format!("tts.endpoint: {e}")));
         }
+        check_scale(
+            "preview.subtitle.margin_fraction",
+            self.preview.subtitle.margin_fraction,
+            SUBTITLE_MARGIN_FRACTION_RANGE,
+        )
+        .map_err(invalid)?;
+        check_scale(
+            "preview.subtitle.font_scale",
+            self.preview.subtitle.font_scale,
+            SUBTITLE_FONT_SCALE_RANGE,
+        )
+        .map_err(invalid)?;
+        check_range(
+            "preview.subtitle.outline_width",
+            self.preview.subtitle.outline_width,
+            0,
+            MAX_SUBTITLE_OUTLINE_WIDTH,
+        )
+        .map_err(invalid)?;
         if self.speakers.is_empty() {
             return Err(invalid("at least one speaker must be configured".into()));
         }
@@ -544,6 +655,16 @@ preview:
   # optional font file for captions, e.g. assets/fonts/NotoSansJP-Regular.ttf
   # font:
   background_color: "#1e1e2e"
+  # subtitle styling (P1-3); all fields optional, shown here at their defaults
+  # subtitle:
+  #   position: bottom   # or: top
+  #   margin_fraction: 0.20
+  #   font_color: white
+  #   outline_color: black
+  #   outline_width: 3
+  #   background: false
+  #   background_color: "0x000000AA"
+  #   font_scale: 1.0
 
 export:
   ymm4:
@@ -822,5 +943,60 @@ mod tests {
         assert!(ok("video:\n  fps: 240\n  width: 16384\n  height: 16384"));
         assert!(ok("tts:\n  concurrency: 16\n  timeout_secs: 600"));
         assert!(ok("timeline:\n  dialogue_gap_ms: 0"));
+    }
+
+    #[test]
+    fn subtitle_config_defaults_when_omitted() {
+        let cfg = Config::parse(&default_config_yaml("demo"), Path::new("x.yaml")).unwrap();
+        assert_eq!(cfg.preview.subtitle.position, SubtitlePosition::Bottom);
+        assert_eq!(cfg.preview.subtitle.margin_fraction, 0.20);
+        assert_eq!(cfg.preview.subtitle.font_color, "white");
+        assert_eq!(cfg.preview.subtitle.outline_color, "black");
+        assert_eq!(cfg.preview.subtitle.outline_width, 3);
+        assert!(!cfg.preview.subtitle.background);
+        assert_eq!(cfg.preview.subtitle.font_scale, 1.0);
+    }
+
+    #[test]
+    fn subtitle_config_can_be_fully_overridden() {
+        let yaml = "speakers:\n  a: {}\npreview:\n  subtitle:\n    position: top\n    margin_fraction: 0.1\n    font_color: yellow\n    outline_color: blue\n    outline_width: 5\n    background: true\n    background_color: \"0x000000FF\"\n    font_scale: 1.5\n";
+        let cfg = Config::parse(yaml, Path::new("x.yaml")).unwrap();
+        assert_eq!(cfg.preview.subtitle.position, SubtitlePosition::Top);
+        assert_eq!(cfg.preview.subtitle.margin_fraction, 0.1);
+        assert_eq!(cfg.preview.subtitle.font_color, "yellow");
+        assert_eq!(cfg.preview.subtitle.outline_color, "blue");
+        assert_eq!(cfg.preview.subtitle.outline_width, 5);
+        assert!(cfg.preview.subtitle.background);
+        assert_eq!(cfg.preview.subtitle.background_color, "0x000000FF");
+        assert_eq!(cfg.preview.subtitle.font_scale, 1.5);
+    }
+
+    #[test]
+    fn subtitle_config_rejects_out_of_range_values() {
+        let bad = |yaml: &str| {
+            Config::parse(
+                &format!("speakers:\n  a: {{}}\n{yaml}"),
+                Path::new("x.yaml"),
+            )
+            .unwrap_err()
+            .to_string()
+        };
+        assert!(bad("preview:\n  subtitle:\n    margin_fraction: 0.9\n")
+            .contains("preview.subtitle.margin_fraction"));
+        assert!(bad("preview:\n  subtitle:\n    font_scale: 10.0\n")
+            .contains("preview.subtitle.font_scale"));
+        assert!(bad("preview:\n  subtitle:\n    outline_width: 100\n")
+            .contains("preview.subtitle.outline_width"));
+    }
+
+    #[test]
+    fn speaker_caption_color_override_is_optional() {
+        let cfg = Config::parse(
+            "speakers:\n  a:\n    caption_color: \"#ff0000\"\n  b: {}\n",
+            Path::new("x.yaml"),
+        )
+        .unwrap();
+        assert_eq!(cfg.speakers["a"].caption_color.as_deref(), Some("#ff0000"));
+        assert_eq!(cfg.speakers["b"].caption_color, None);
     }
 }

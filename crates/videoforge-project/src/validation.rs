@@ -277,6 +277,7 @@ mod tests {
                     duration_ms: 1000,
                     speaker: "reimu".into(),
                     speaker_display: Some("霊夢".into()),
+                    color: None,
                     extra: BTreeMap::new(),
                 })],
             },
@@ -324,6 +325,7 @@ mod tests {
             duration_ms: 1,
             speaker: "marisa".into(),
             speaker_display: None,
+            color: None,
             extra: BTreeMap::new(),
         });
 

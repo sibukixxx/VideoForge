@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use videoforge_core::config::{SubtitleConfig, SubtitlePosition};
 use videoforge_core::lipsync::{mouth_segments, LipSyncTrack, MouthState};
 use videoforge_core::preview::{CharacterSpriteSet, PreviewRequest};
 use videoforge_core::project::{Clip, FitMode, Transform, VideoProject};
@@ -196,6 +197,10 @@ pub struct CaptionPlan {
     /// Relative to the project dir.
     pub text_file: String,
     pub speaker_file: String,
+    /// Resolved caption text color (P1-3): `CaptionClip::color` (a
+    /// per-speaker `SpeakerConfig::caption_color` override, baked into the
+    /// IR at generate time) if set, else `preview.subtitle.font_color`.
+    pub color: String,
 }
 
 /// One on-screen text clip (P1-1's `TextClip`) ready to render via
@@ -273,6 +278,9 @@ pub struct RenderPlan {
     /// captions/texts (always on top — P1-3's caption/character layout rule
     /// extended to every visual clip, not just characters).
     pub visual_layers: Vec<VisualLayerPlan>,
+    /// Caption/subtitle styling (P1-3): position, margin, colors, outline,
+    /// background box, font scale.
+    pub subtitle: SubtitleConfig,
 }
 
 impl RenderPlan {
@@ -295,6 +303,7 @@ impl RenderPlan {
         Ok(Self::build(
             request.project,
             request.background_color,
+            request.subtitle.clone(),
             request.font.map(Path::to_path_buf),
             request.output.to_path_buf(),
             scratch_dir.to_path_buf(),
@@ -307,6 +316,7 @@ impl RenderPlan {
     pub fn build(
         project: &VideoProject,
         background_color: &str,
+        subtitle: SubtitleConfig,
         font: Option<PathBuf>,
         output: PathBuf,
         scratch_dir: PathBuf,
@@ -336,6 +346,10 @@ impl RenderPlan {
                 text: c.text.clone(),
                 text_file: format!("{scratch_rel}/caption-{:03}.txt", i + 1),
                 speaker_file: format!("{scratch_rel}/speaker-{:03}.txt", i + 1),
+                color: c
+                    .color
+                    .clone()
+                    .unwrap_or_else(|| subtitle.font_color.clone()),
             })
             .collect();
         const DEFAULT_TEXT_COLOR: &str = "white";
@@ -395,6 +409,7 @@ impl RenderPlan {
             scratch_rel,
             character_overlays,
             visual_layers,
+            subtitle,
         }
     }
 
@@ -416,11 +431,11 @@ impl RenderPlan {
     }
 
     fn caption_font_size(&self) -> u32 {
-        (self.height as f64 * 0.048).round() as u32
+        (self.height as f64 * 0.048 * self.subtitle.font_scale as f64).round() as u32
     }
 
     fn speaker_font_size(&self) -> u32 {
-        (self.height as f64 * 0.034).round() as u32
+        (self.height as f64 * 0.034 * self.subtitle.font_scale as f64).round() as u32
     }
 
     fn max_chars_per_line(&self) -> usize {
@@ -429,13 +444,39 @@ impl RenderPlan {
         (usable / self.caption_font_size() as f64).floor().max(8.0) as usize
     }
 
-    /// Pixel height of the bottom "caption safe area" (speaker label +
-    /// caption text + their margins), measured from the bottom edge. Shared
-    /// by the caption `drawtext` y-position and the character overlay
-    /// clamp below, so a character can never be placed under the captions —
-    /// structural, not incidental (P0-1: "字幕との重なりを考慮できる構造").
+    /// Pixel distance between `subtitle.position`'s edge and the caption
+    /// text's baseline (`preview.subtitle.margin_fraction` of frame height —
+    /// `0.20` was a hard-coded constant here before P1-3).
+    fn caption_margin_px(&self) -> u32 {
+        (self.height as f64 * self.subtitle.margin_fraction as f64).round() as u32
+    }
+
+    /// Pixel height of the "caption safe area" (speaker label and caption
+    /// text, plus their margins), measured from whichever edge
+    /// `subtitle.position` anchors captions to. Shared by the caption
+    /// `drawtext` y-position and the character overlay clamp below, so a
+    /// character can never be placed under the captions — structural, not
+    /// incidental (P0-1: "字幕との重なりを考慮できる構造").
     fn caption_safe_area_px(&self) -> u32 {
-        (self.height as f64 * 0.20).round() as u32 + self.speaker_font_size() + 16
+        self.caption_margin_px() + self.speaker_font_size() + 16
+    }
+
+    /// `drawtext` `y=` expression for the caption text, and for the speaker
+    /// label above it — "above" meaning further from the frame's edge,
+    /// regardless of whether captions render at the top or the bottom.
+    fn caption_y_exprs(&self) -> (String, String) {
+        let margin = self.caption_margin_px();
+        let speaker_size = self.speaker_font_size();
+        match self.subtitle.position {
+            SubtitlePosition::Bottom => (
+                format!("h-{margin}"),
+                format!("h-{}", margin + speaker_size + 16),
+            ),
+            SubtitlePosition::Top => (
+                format!("{}", margin + speaker_size + 16),
+                format!("{margin}"),
+            ),
+        }
     }
 
     /// Target pixel height for a character sprite at the given
@@ -454,19 +495,26 @@ impl RenderPlan {
 
     /// FFmpeg `overlay` x/y expressions placing a character at `transform`'s
     /// normalized centre (same semantics as every other clip's `Transform`),
-    /// clamped to stay fully inside the frame and above the caption safe
-    /// area. `overlay_w`/`overlay_h` are resolved by FFmpeg at run time from
-    /// the actual scaled sprite, so this does not need to know pixel sizes.
+    /// clamped to stay fully inside the frame and clear of the caption safe
+    /// area on whichever edge `subtitle.position` anchors it to.
+    /// `overlay_w`/`overlay_h` are resolved by FFmpeg at run time from the
+    /// actual scaled sprite, so this does not need to know pixel sizes.
     fn overlay_position_exprs(&self, transform: &Transform) -> (String, String) {
         let safe_area = self.caption_safe_area_px();
         let x = format!(
             "min(max(0,{:.4}*main_w-overlay_w/2),main_w-overlay_w)",
             transform.x
         );
-        let y = format!(
-            "min(max(0,{:.4}*main_h-overlay_h/2),main_h-{safe_area}-overlay_h)",
-            transform.y
-        );
+        let y = match self.subtitle.position {
+            SubtitlePosition::Bottom => format!(
+                "min(max(0,{:.4}*main_h-overlay_h/2),main_h-{safe_area}-overlay_h)",
+                transform.y
+            ),
+            SubtitlePosition::Top => format!(
+                "min(max({safe_area},{:.4}*main_h-overlay_h/2),main_h-overlay_h)",
+                transform.y
+            ),
+        };
         (x, y)
     }
 
@@ -806,8 +854,15 @@ impl RenderPlan {
             .unwrap_or_default();
         let caption_size = self.caption_font_size();
         let speaker_size = self.speaker_font_size();
-        let caption_y = format!("h-{}", (h as f64 * 0.20).round() as u32);
-        let speaker_y = format!("h-{}", (h as f64 * 0.20).round() as u32 + speaker_size + 16);
+        let (caption_y, speaker_y) = self.caption_y_exprs();
+        let caption_box = if self.subtitle.background {
+            format!(
+                ":box=1:boxcolor={}:boxborderw=10",
+                self.subtitle.background_color
+            )
+        } else {
+            String::new()
+        };
         let mut tail = Vec::new();
         for c in &self.captions {
             let enable = format!(
@@ -820,8 +875,11 @@ impl RenderPlan {
                 quote_filter_value(&c.speaker_file)
             ));
             tail.push(format!(
-                "drawtext=textfile={}{font}:fontsize={caption_size}:fontcolor=white:borderw=3:bordercolor=black:line_spacing=8:text_align=center:x=(w-text_w)/2:y={caption_y}:{enable}",
-                quote_filter_value(&c.text_file)
+                "drawtext=textfile={}{font}:fontsize={caption_size}:fontcolor={}:borderw={}:bordercolor={}:line_spacing=8:text_align=center:x=(w-text_w)/2:y={caption_y}{caption_box}:{enable}",
+                quote_filter_value(&c.text_file),
+                c.color,
+                self.subtitle.outline_width,
+                self.subtitle.outline_color,
             ));
         }
         // On-screen text clips (P1-1/P1-3): rendered after captions, so a
@@ -1278,6 +1336,7 @@ mod tests {
                     duration_ms: 3410,
                     speaker: "reimu".into(),
                     speaker_display: Some("霊夢".into()),
+                    color: None,
                     extra: BTreeMap::new(),
                 }),
                 Clip::Caption(CaptionClip {
@@ -1287,6 +1346,7 @@ mod tests {
                     duration_ms: 3680,
                     speaker: "marisa".into(),
                     speaker_display: None,
+                    color: None,
                     extra: BTreeMap::new(),
                 }),
             ],
@@ -1298,6 +1358,7 @@ mod tests {
         RenderPlan::build(
             &project(with_background),
             "#1e1e2e",
+            SubtitleConfig::default(),
             font.map(PathBuf::from),
             PathBuf::from("/out/preview.mp4"),
             PathBuf::from("/proj/.preview.mp4.tmp"),
@@ -1352,6 +1413,7 @@ mod tests {
         let plan = RenderPlan::build(
             &p,
             "black",
+            SubtitleConfig::default(),
             None,
             "o.mp4".into(),
             "/p/.t".into(),
@@ -1452,6 +1514,7 @@ mod tests {
         let plan = RenderPlan::build(
             &project(true),
             "#000000",
+            SubtitleConfig::default(),
             None,
             root.join("preview.mp4"),
             scratch.clone(),
@@ -1507,6 +1570,7 @@ mod tests {
         RenderPlan::build(
             &project(false),
             "#000000",
+            SubtitleConfig::default(),
             None,
             "o.mp4".into(),
             "/p/.t".into(),
@@ -1626,6 +1690,155 @@ mod tests {
         assert!(x.contains("0.5000*main_w"));
         assert!(y.contains("0.9000*main_h"));
         assert!(y.contains("main_h-")); // clamped against the caption safe area
+    }
+
+    // -------------------------------------------------------------- subtitle engine (P1-3)
+
+    fn plan_with_subtitle(subtitle: SubtitleConfig) -> RenderPlan {
+        RenderPlan::build(
+            &project(false),
+            "#000000",
+            subtitle,
+            None,
+            "o.mp4".into(),
+            "/p/.t".into(),
+            ".t".into(),
+            Vec::new(),
+        )
+    }
+
+    fn plan_with_subtitle_and_caption_colors(
+        subtitle: SubtitleConfig,
+        colors: [Option<&str>; 2],
+    ) -> RenderPlan {
+        let mut p = project(false);
+        let caption_track = p
+            .tracks
+            .iter_mut()
+            .find(|t| t.kind == TrackKind::Caption)
+            .unwrap();
+        for (clip, color) in caption_track.clips.iter_mut().zip(colors) {
+            if let Clip::Caption(c) = clip {
+                c.color = color.map(str::to_string);
+            }
+        }
+        RenderPlan::build(
+            &p,
+            "#000000",
+            subtitle,
+            None,
+            "o.mp4".into(),
+            "/p/.t".into(),
+            ".t".into(),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn subtitle_position_bottom_is_the_default_and_anchors_to_the_bottom_edge() {
+        let plan = plan_with_subtitle(SubtitleConfig::default());
+        let (caption_y, speaker_y) = plan.caption_y_exprs();
+        assert!(caption_y.starts_with("h-"), "{caption_y}");
+        assert!(speaker_y.starts_with("h-"), "{speaker_y}");
+    }
+
+    #[test]
+    fn subtitle_position_top_anchors_captions_to_the_top_edge_with_the_speaker_label_above() {
+        let subtitle = SubtitleConfig {
+            position: SubtitlePosition::Top,
+            ..SubtitleConfig::default()
+        };
+        let plan = plan_with_subtitle(subtitle);
+        let (caption_y, speaker_y) = plan.caption_y_exprs();
+        assert!(!caption_y.starts_with("h-"), "{caption_y}");
+        assert!(!speaker_y.starts_with("h-"), "{speaker_y}");
+        let caption_px: u32 = caption_y.parse().unwrap();
+        let speaker_px: u32 = speaker_y.parse().unwrap();
+        assert!(
+            speaker_px < caption_px,
+            "speaker label must stay closer to the top edge than the caption text"
+        );
+    }
+
+    #[test]
+    fn subtitle_position_top_clamps_character_overlays_below_the_top_safe_area() {
+        let subtitle = SubtitleConfig {
+            position: SubtitlePosition::Top,
+            ..SubtitleConfig::default()
+        };
+        let plan = plan_with_subtitle(subtitle);
+        let safe_area = plan.caption_safe_area_px();
+        let (_, y) = plan.overlay_position_exprs(&Transform::default());
+        assert!(
+            y.contains(&format!("max({safe_area}")),
+            "{y} must clamp its minimum to the top safe area"
+        );
+    }
+
+    #[test]
+    fn subtitle_style_colors_outline_and_background_box_are_applied() {
+        let subtitle = SubtitleConfig {
+            font_color: "yellow".into(),
+            outline_color: "blue".into(),
+            outline_width: 7,
+            background: true,
+            background_color: "0x112233CC".into(),
+            ..SubtitleConfig::default()
+        };
+        let plan = plan_with_subtitle(subtitle);
+        let fc = plan.video_filter();
+        assert!(fc.contains("fontcolor=yellow"), "{fc}");
+        assert!(fc.contains("bordercolor=blue"), "{fc}");
+        assert!(fc.contains("borderw=7"), "{fc}");
+        assert!(fc.contains("boxcolor=0x112233CC"), "{fc}");
+    }
+
+    #[test]
+    fn subtitle_background_box_is_off_by_default() {
+        let plan = plan_with_subtitle(SubtitleConfig::default());
+        let fc = plan.video_filter();
+        // one `box=1` per caption's always-on speaker-name label; the
+        // caption text itself gets no box unless `subtitle.background` opts in.
+        assert_eq!(fc.matches("box=1").count(), plan.captions.len());
+    }
+
+    #[test]
+    fn caption_color_override_falls_back_to_subtitle_font_color() {
+        let subtitle = SubtitleConfig {
+            font_color: "white".into(),
+            ..SubtitleConfig::default()
+        };
+        let plan = plan_with_subtitle_and_caption_colors(subtitle, [Some("#ff00ff"), None]);
+        assert_eq!(plan.captions[0].color, "#ff00ff");
+        assert_eq!(plan.captions[1].color, "white");
+        let fc = plan.video_filter();
+        assert!(fc.contains("fontcolor=#ff00ff"), "{fc}");
+        assert!(fc.contains("fontcolor=white"), "{fc}");
+    }
+
+    #[test]
+    fn subtitle_font_scale_grows_caption_font_and_shrinks_the_wrap_width() {
+        let default_plan = plan_with_subtitle(SubtitleConfig::default());
+        let scaled = SubtitleConfig {
+            font_scale: 2.0,
+            ..SubtitleConfig::default()
+        };
+        let scaled_plan = plan_with_subtitle(scaled);
+        assert!(scaled_plan.caption_font_size() > default_plan.caption_font_size());
+        assert!(scaled_plan.max_chars_per_line() < default_plan.max_chars_per_line());
+    }
+
+    #[test]
+    fn subtitle_margin_fraction_changes_the_caption_safe_area() {
+        let small_plan = plan_with_subtitle(SubtitleConfig {
+            margin_fraction: 0.05,
+            ..SubtitleConfig::default()
+        });
+        let large_plan = plan_with_subtitle(SubtitleConfig {
+            margin_fraction: 0.35,
+            ..SubtitleConfig::default()
+        });
+        assert!(small_plan.caption_safe_area_px() < large_plan.caption_safe_area_px());
     }
 
     #[test]
@@ -1801,6 +2014,7 @@ mod tests {
         let mut plan = RenderPlan::build(
             &project(false),
             "#000000",
+            SubtitleConfig::default(),
             None,
             "o.mp4".into(),
             "/p/.t".into(),
@@ -2031,6 +2245,7 @@ mod tests {
         let plan = RenderPlan::build(
             &p,
             "#000000",
+            SubtitleConfig::default(),
             None,
             "o.mp4".into(),
             "/p/.t".into(),
@@ -2068,6 +2283,7 @@ mod tests {
         let mut plan = RenderPlan::build(
             &p,
             "#000000",
+            SubtitleConfig::default(),
             None,
             "o.mp4".into(),
             dir.path().join("scratch"),
@@ -2114,6 +2330,7 @@ mod tests {
         RenderPlan::build(
             p,
             "#000000",
+            SubtitleConfig::default(),
             None,
             "o.mp4".into(),
             "/p/.t".into(),

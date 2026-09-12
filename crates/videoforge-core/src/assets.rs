@@ -303,6 +303,7 @@ mod tests {
                 duration_ms: 1000,
                 speaker: "a".into(),
                 speaker_display: None,
+                color: None,
                 extra: BTreeMap::new(),
             })],
         });

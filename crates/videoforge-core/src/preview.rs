@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use videoforge_project::VideoProject;
 
+use crate::config::SubtitleConfig;
 use crate::error::AppError;
 
 /// Absolute paths to a `png_lipsync` character's three mouth-state sprites
@@ -31,6 +32,9 @@ pub struct PreviewRequest<'a> {
     pub font: Option<&'a Path>,
     /// Flat background color (hex) used when the project has no background clip.
     pub background_color: &'a str,
+    /// Caption/subtitle styling (P1-3): position, margin, colors, outline,
+    /// background box.
+    pub subtitle: &'a SubtitleConfig,
     /// Resolved sprite sets for every `png_lipsync` character referenced on
     /// the project's `character_performance` track, keyed by character id.
     /// Empty for a project that uses no character, or only Live2D

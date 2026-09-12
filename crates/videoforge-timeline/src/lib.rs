@@ -58,6 +58,11 @@ pub struct DialogueInput {
     pub text: String,
     pub audio: RelativeAssetPath,
     pub duration_ms: u64,
+    /// Per-speaker caption color override (P1-3), resolved from
+    /// `SpeakerConfig::caption_color` before the timeline is built —
+    /// `None` means "use `preview.subtitle.font_color`".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption_color: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,6 +235,7 @@ pub fn build(input: TimelineInput) -> Result<VideoProject, TimelineError> {
             duration_ms: d.duration_ms,
             speaker: d.speaker.clone(),
             speaker_display: Some(d.speaker_display.clone()),
+            color: d.caption_color.clone(),
             extra: BTreeMap::new(),
         }));
     }
@@ -473,6 +479,7 @@ mod tests {
             text: format!("text {index}"),
             audio: RelativeAssetPath::new(format!("assets/audio/{index:03}.wav")).unwrap(),
             duration_ms,
+            caption_color: None,
         }
     }
 
