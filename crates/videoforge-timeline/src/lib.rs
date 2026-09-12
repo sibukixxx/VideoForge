@@ -27,8 +27,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use videoforge_project::{
     AudioClip, BackgroundClip, BgmClip, CaptionClip, CharacterClip, CharacterPerformanceClip, Clip,
-    ImageClip, Presentation, RelativeAssetPath, SoundEffectClip, SourceInfo, Track, TrackKind,
-    Transform, VideoProject, VideoSettings,
+    ImageClip, MouthAnimation, Presentation, RelativeAssetPath, SoundEffectClip, SourceInfo, Track,
+    TrackKind, Transform, VideoProject, VideoSettings,
 };
 
 /// Default length of a sound effect clip when the script gives none.
@@ -96,6 +96,8 @@ pub enum VisualEventKind {
         /// Canonical speaker key the stand-in belongs to, if it maps to one.
         speaker: Option<String>,
         source: RelativeAssetPath,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mouth: Option<MouthAnimation>,
         transform: Transform,
         presentation: Option<Presentation>,
     },
@@ -347,6 +349,7 @@ pub fn place_visual_events(
             VisualEventKind::Character {
                 speaker,
                 source,
+                mouth,
                 transform,
                 presentation,
             } => character.push(Clip::Character(CharacterClip {
@@ -355,6 +358,7 @@ pub fn place_visual_events(
                 start_ms: start,
                 duration_ms,
                 speaker,
+                mouth,
                 transform,
                 presentation,
                 extra,
@@ -504,6 +508,7 @@ mod tests {
             kind: VisualEventKind::Character {
                 speaker: Some(speaker.into()),
                 source: asset(path),
+                mouth: None,
                 transform: Transform::default(),
                 presentation: None,
             },
