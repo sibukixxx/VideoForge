@@ -8,6 +8,7 @@
 //! Windows APIs, or the YMM4 schema.
 
 pub mod assets;
+pub mod buildcache;
 pub mod capabilities;
 pub mod character;
 pub mod config;

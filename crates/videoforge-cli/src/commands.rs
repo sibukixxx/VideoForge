@@ -405,6 +405,9 @@ pub async fn generate(ctx: &Context, args: GenerateArgs) -> anyhow::Result<ExitC
             GenerationStage::WritingProject => eprintln!("→ Writing project.vfp.json"),
             GenerationStage::WritingCaptions => eprintln!("→ Writing captions.srt"),
             GenerationStage::RenderingPreview => eprintln!("→ Rendering preview.mp4 (ffmpeg)"),
+            GenerationStage::PreviewCacheHit => {
+                eprintln!("→ Reusing preview.mp4 (cached)")
+            }
             GenerationStage::PreviewSkipped { reason } => eprintln!("→ {reason}"),
             GenerationStage::Completed => eprintln!("→ Done"),
         }

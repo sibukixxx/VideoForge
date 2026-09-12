@@ -418,7 +418,6 @@ async fn run_pipeline(
         match &deps.preview {
             Some(renderer) => match renderer.availability() {
                 Ok(_) => {
-                    progress.on_stage(&GenerationStage::RenderingPreview);
                     let output = tmp_dir.join(PREVIEW_FILE);
                     let font = config
                         .preview
@@ -426,17 +425,46 @@ async fn run_pipeline(
                         .as_deref()
                         .and_then(|f| workspace.resolve_allow_absolute(f).ok())
                         .filter(|p| p.is_file());
-                    renderer
-                        .render(PreviewRequest {
-                            project: &project,
-                            project_dir: tmp_dir,
-                            output: &output,
-                            font: font.as_deref(),
-                            background_color: &config.preview.background_color,
-                            character_sprites: &character_sprites,
-                            cancel: cancel.clone(),
-                        })
-                        .await?;
+                    let project_json = project.to_json()?;
+                    let fingerprint = crate::buildcache::preview_fingerprint(
+                        &project_json,
+                        font.as_deref(),
+                        &config.preview.background_color,
+                        renderer.id(),
+                    );
+                    // P0-4: reuse the previous generate's preview.mp4 when
+                    // every input that affects it is byte-for-byte
+                    // unchanged, instead of re-invoking FFmpeg.
+                    let previous_dir = workspace.generated_dir().join(&report.slug);
+                    let previous_preview = previous_dir.join(PREVIEW_FILE);
+                    let previous_fingerprint_path =
+                        previous_dir.join(crate::buildcache::PREVIEW_FINGERPRINT_FILE);
+                    let cache_hit = previous_preview.is_file()
+                        && std::fs::read_to_string(&previous_fingerprint_path)
+                            .map(|s| s == fingerprint)
+                            .unwrap_or(false);
+                    if cache_hit {
+                        std::fs::copy(&previous_preview, &output)
+                            .map_err(|e| AppError::write(&output, e))?;
+                        progress.on_stage(&GenerationStage::PreviewCacheHit);
+                    } else {
+                        progress.on_stage(&GenerationStage::RenderingPreview);
+                        renderer
+                            .render(PreviewRequest {
+                                project: &project,
+                                project_dir: tmp_dir,
+                                output: &output,
+                                font: font.as_deref(),
+                                background_color: &config.preview.background_color,
+                                character_sprites: &character_sprites,
+                                cancel: cancel.clone(),
+                            })
+                            .await?;
+                    }
+                    let fingerprint_path =
+                        tmp_dir.join(crate::buildcache::PREVIEW_FINGERPRINT_FILE);
+                    std::fs::write(&fingerprint_path, &fingerprint)
+                        .map_err(|e| AppError::write(&fingerprint_path, e))?;
                     preview_path = Some(output);
                 }
                 Err(e) => {
@@ -572,6 +600,90 @@ mod tests {
     use super::*;
     use crate::init;
     use crate::tts::FakeTtsEngine;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Records how many times `render()` actually ran, and writes
+    /// deterministic (but distinguishable per call) bytes so a test can
+    /// tell a fresh render apart from a copied/cached one.
+    struct CountingPreviewRenderer {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl PreviewRenderer for CountingPreviewRenderer {
+        fn id(&self) -> &'static str {
+            "counting-fake"
+        }
+        fn availability(&self) -> Result<String, AppError> {
+            Ok("fake".into())
+        }
+        async fn render(&self, request: PreviewRequest<'_>) -> Result<(), AppError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            std::fs::write(request.output, format!("render #{n}"))
+                .map_err(|e| AppError::write(request.output, e))
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_render_is_skipped_when_nothing_that_affects_it_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        init::init(dir.path(), Some("t")).unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let script = ws.scripts_dir().join("sample.md");
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let make_deps = || {
+            let mut deps = GenerateDeps::new(Arc::new(FakeTtsEngine::default()));
+            deps.preview = Some(Arc::new(CountingPreviewRenderer {
+                calls: Arc::clone(&calls),
+            }));
+            deps
+        };
+
+        let first = generate(&ws, &script, GenerateOptions::default(), make_deps())
+            .await
+            .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "first generate must render"
+        );
+        let first_bytes = std::fs::read(first.preview_path.unwrap()).unwrap();
+
+        // Regenerate from the exact same script/config: nothing that
+        // affects the preview changed, so the cache must be hit.
+        let second = generate(&ws, &script, GenerateOptions::default(), make_deps())
+            .await
+            .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "unchanged inputs must not re-render"
+        );
+        let second_bytes = std::fs::read(second.preview_path.unwrap()).unwrap();
+        assert_eq!(
+            first_bytes, second_bytes,
+            "the cached preview.mp4 bytes must be reused verbatim"
+        );
+
+        // Changing a preview-affecting setting (background color) must
+        // invalidate the cache and re-render.
+        std::fs::write(
+            ws.root().join("videoforge.yaml"),
+            std::fs::read_to_string(ws.root().join("videoforge.yaml"))
+                .unwrap()
+                .replace("#1e1e2e", "#ffffff"),
+        )
+        .unwrap();
+        generate(&ws, &script, GenerateOptions::default(), make_deps())
+            .await
+            .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a changed background color must invalidate the cache"
+        );
+    }
 
     #[tokio::test]
     async fn end_to_end_with_fake_tts() {

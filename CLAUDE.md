@@ -104,6 +104,17 @@ let two waiters lock different inodes and both believe they won.
 Failures that are recoverable (no FFmpeg, no renderer) become warnings in the manifest via
 `GenerationStage::PreviewSkipped` rather than errors.
 
+### Incremental build (P0-4, minimal)
+
+TTS already skips synthesis per-dialogue via `TtsCache` (keyed on engine version + voice params +
+text — see "TTS cache" below). `core::buildcache::preview_fingerprint` extends the same idea to the
+other expensive stage: it hashes the project IR JSON + the resolved font's actual bytes +
+`preview.background_color` + the renderer's `id()`. If that fingerprint matches the sidecar
+`.preview.fingerprint` next to the *previous* `generated/<slug>/preview.mp4`, `generate` copies that
+file instead of invoking FFmpeg again (`GenerationStage::PreviewCacheHit`). Timeline scheduling and
+caption rendering are pure/cheap and are not separately cached. This is not a general per-stage
+dependency graph — there is no `--from`/`--only` yet (see "Known gaps").
+
 ## Invariants
 
 These span files and are easy to break silently:
@@ -179,3 +190,10 @@ These span files and are easy to break silently:
   `docs/character-system.md`. Neither path has GUI wiring yet. The manual procedure
   (`docs/testing/character-manual-e2e.md`) has an empty results table — whoever runs it with a real
   VOICEVOX character (and, for the PNG path, real closed/half/open artwork) fills that in.
+- Incremental build (P0-4) covers exactly one stage (the FFmpeg preview render, see "Incremental
+  build" above). There is no general per-stage dependency graph, no `videoforge generate --from`/
+  `--only`, and no cross-process "resume a failed generate" beyond what the existing tmp-dir/lock
+  machinery already gives (a crashed generate never corrupts `generated/<slug>/`, but it does not
+  resume mid-pipeline either — the next `generate` starts over from validation).
+- The asset registry (P0-2, `core::assets`) is per-generate only: no cross-project catalog, no
+  dedup index, no UI. `videoforge assets` reads back one `asset-registry.json` at a time.
