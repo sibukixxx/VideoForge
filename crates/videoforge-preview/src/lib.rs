@@ -23,6 +23,47 @@ pub use command::{
 pub struct FfmpegInfo {
     pub path: PathBuf,
     pub version: String,
+    pub capabilities: FfmpegCapabilities,
+}
+
+/// FFmpeg features used by the preview filter graph and default encoder.
+/// Keeping this explicit lets `doctor` reject an incomplete FFmpeg build
+/// before TTS work starts (most notably builds without `drawtext`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FfmpegCapabilities {
+    pub filters: Vec<String>,
+    pub encoders: Vec<String>,
+}
+
+impl FfmpegCapabilities {
+    const REQUIRED_FILTERS: [&'static str; 10] = [
+        "adelay",
+        "afade",
+        "amix",
+        "crop",
+        "drawtext",
+        "overlay",
+        "rotate",
+        "scale",
+        "volume",
+        "dynaudnorm",
+    ];
+    const REQUIRED_ENCODERS: [&'static str; 2] = ["aac", "libx264"];
+
+    pub fn missing_required(&self) -> Vec<String> {
+        let mut missing = Vec::new();
+        for required in Self::REQUIRED_FILTERS {
+            if !self.filters.iter().any(|value| value == required) {
+                missing.push(format!("filter:{required}"));
+            }
+        }
+        for required in Self::REQUIRED_ENCODERS {
+            if !self.encoders.iter().any(|value| value == required) {
+                missing.push(format!("encoder:{required}"));
+            }
+        }
+        missing
+    }
 }
 
 /// Locate FFmpeg: `$VIDEOFORGE_FFMPEG`, else `ffmpeg` on `PATH`.
@@ -49,10 +90,58 @@ pub fn detect_ffmpeg() -> Result<FfmpegInfo, AppError> {
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     let version = stdout.lines().next().unwrap_or("ffmpeg").trim().to_string();
+    let capabilities = detect_capabilities(&candidate)?;
     Ok(FfmpegInfo {
         path: candidate,
         version,
+        capabilities,
     })
+}
+
+fn detect_capabilities(ffmpeg: &Path) -> Result<FfmpegCapabilities, AppError> {
+    let filters = command_listing(ffmpeg, "-filters")?;
+    let encoders = command_listing(ffmpeg, "-encoders")?;
+    Ok(FfmpegCapabilities {
+        filters: parse_listing_names(&filters),
+        encoders: parse_listing_names(&encoders),
+    })
+}
+
+fn command_listing(ffmpeg: &Path, argument: &str) -> Result<String, AppError> {
+    let output = std::process::Command::new(ffmpeg)
+        .args(["-hide_banner", argument])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| {
+            AppError::FfmpegUnavailable(format!(
+                "`{} {argument}` could not be executed ({e})",
+                ffmpeg.display()
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(AppError::FfmpegUnavailable(format!(
+            "`{} {argument}` exited with {}",
+            ffmpeg.display(),
+            output.status
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn parse_listing_names(listing: &str) -> Vec<String> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let flags = fields.next()?;
+            let name = fields.next()?;
+            if flags.chars().all(|c| c == '.' || c.is_ascii_uppercase()) {
+                Some(name.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +165,19 @@ impl FfmpegPreviewRenderer {
             ffmpeg: Ok(FfmpegInfo {
                 path: path.into(),
                 version: "unknown".into(),
+                // Explicit injection is used by renderer tests. Detection is
+                // intentionally bypassed so a test can supply a wrapper or a
+                // binary whose capabilities were already established.
+                capabilities: FfmpegCapabilities {
+                    filters: FfmpegCapabilities::REQUIRED_FILTERS
+                        .iter()
+                        .map(|value| (*value).to_string())
+                        .collect(),
+                    encoders: FfmpegCapabilities::REQUIRED_ENCODERS
+                        .iter()
+                        .map(|value| (*value).to_string())
+                        .collect(),
+                },
             }),
         }
     }
@@ -99,7 +201,22 @@ impl PreviewRenderer for FfmpegPreviewRenderer {
 
     fn availability(&self) -> Result<String, AppError> {
         match &self.ffmpeg {
-            Ok(info) => Ok(format!("{} ({})", info.version, info.path.display())),
+            Ok(info) => {
+                let missing = info.capabilities.missing_required();
+                if missing.is_empty() {
+                    Ok(format!(
+                        "{} ({}) — required filters/encoders available",
+                        info.version,
+                        info.path.display()
+                    ))
+                } else {
+                    Err(AppError::FfmpegUnavailable(format!(
+                        "{} is missing required preview capabilities: {}",
+                        info.path.display(),
+                        missing.join(", ")
+                    )))
+                }
+            }
             Err(e) => Err(AppError::FfmpegUnavailable(e.clone())),
         }
     }
@@ -130,6 +247,34 @@ impl PreviewRenderer for FfmpegPreviewRenderer {
             )));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ffmpeg_filter_and_encoder_listings() {
+        let listing = " Filters:\n T.. = Timeline support\n ... drawtext         V->V\n TS. overlay          VV->V\n V..... libx264       H.264 encoder\n A..... aac           AAC encoder\n";
+        assert_eq!(
+            parse_listing_names(listing),
+            ["drawtext", "overlay", "libx264", "aac"]
+        );
+    }
+
+    #[test]
+    fn reports_each_missing_required_capability() {
+        let capabilities = FfmpegCapabilities {
+            filters: FfmpegCapabilities::REQUIRED_FILTERS
+                .iter()
+                .filter(|value| **value != "drawtext")
+                .map(|value| (*value).to_string())
+                .collect(),
+            encoders: vec!["aac".into()],
+        };
+        let missing = capabilities.missing_required();
+        assert_eq!(missing, ["filter:drawtext", "encoder:libx264"]);
     }
 }
 
