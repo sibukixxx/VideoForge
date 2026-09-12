@@ -228,6 +228,7 @@ fn clip_kind(clip: &Clip) -> TrackKind {
         Clip::Character(_) => TrackKind::Character,
         Clip::Bgm(_) => TrackKind::Bgm,
         Clip::SoundEffect(_) => TrackKind::SoundEffect,
+        Clip::CharacterPerformance(_) => TrackKind::CharacterPerformance,
     }
 }
 
@@ -240,6 +241,7 @@ fn kind_name(kind: TrackKind) -> &'static str {
         TrackKind::Background => "background",
         TrackKind::SoundEffect => "sound_effect",
         TrackKind::Bgm => "bgm",
+        TrackKind::CharacterPerformance => "character_performance",
     }
 }
 
@@ -248,7 +250,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::{AudioClip, CaptionClip, RelativeAssetPath, Track, VideoSettings};
+    use crate::{
+        AudioClip, CaptionClip, CharacterPerformanceClip, RelativeAssetPath, Track, VideoSettings,
+    };
 
     fn valid_project() -> VideoProject {
         let mut project = VideoProject::new("sample", "Sample", VideoSettings::default());
@@ -285,6 +289,27 @@ mod tests {
     #[test]
     fn accepts_a_valid_generated_shape() {
         assert!(validate_project(&valid_project()).is_ok());
+    }
+
+    #[test]
+    fn accepts_character_performance_on_its_matching_track() {
+        let mut project = valid_project();
+        project.tracks.push(Track {
+            id: "character-performance".into(),
+            kind: TrackKind::CharacterPerformance,
+            clips: vec![Clip::CharacterPerformance(CharacterPerformanceClip {
+                id: "character-performance-001".into(),
+                start_ms: 0,
+                duration_ms: 1000,
+                character: "tsumugi".into(),
+                expression: "default".into(),
+                motion: "idle".into(),
+                lip_sync: RelativeAssetPath::new("assets/lipsync/001.json").unwrap(),
+                extra: BTreeMap::new(),
+            })],
+        });
+
+        assert!(validate_project(&project).is_ok());
     }
 
     #[test]
