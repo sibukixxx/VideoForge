@@ -99,61 +99,74 @@ pub fn resolve_speaker_profiles_from_list(
             .cloned()
             .unwrap_or_else(|| key.clone());
 
-        let (resolved_voice, character, legacy_unpinned_voice) =
-            if let Some(character_id) = &speaker_cfg.character_id {
-                let loaded = loaded_manifest.as_ref().ok_or_else(|| AppError::InvalidConfig {
+        let (resolved_voice, character, legacy_unpinned_voice) = if let Some(character_id) =
+            &speaker_cfg.character_id
+        {
+            let loaded = loaded_manifest.as_ref().ok_or_else(|| AppError::InvalidConfig {
                     path: workspace.root().join("videoforge.yaml"),
                     reason: format!(
                         "speakers.{key}.character_id is set but character_manifest could not be loaded"
                     ),
                 })?;
-                let character = loaded.manifest.find(character_id).ok_or_else(|| {
-                    AppError::CharacterNotFound {
+            let character =
+                loaded
+                    .manifest
+                    .find(character_id)
+                    .ok_or_else(|| AppError::CharacterNotFound {
                         id: character_id.clone(),
                         known: loaded.manifest.character_ids().join(", "),
-                    }
-                })?;
-
-                let identity = if let Some(voice) = &character.voice {
-                    find_named_voice(engine_speakers, &voice.speaker, &voice.style).ok_or_else(
-                        || AppError::VoicevoxSpeakerNotFound {
-                            speaker: voice.speaker.clone(),
-                            style: voice.style.clone(),
-                            known: describe_speakers(engine_speakers),
-                        },
-                    )?
-                } else {
-                    find_style_id(engine_speakers, speaker_cfg.voice.speaker_id).ok_or_else(|| {
-                        invalid_style_id(workspace, key, speaker_cfg.voice.speaker_id, engine_speakers)
-                    })?
-                };
-
-                let manifest_dir = loaded.path.parent().unwrap_or_else(|| Path::new("."));
-                let model_type = character.model.as_ref().map(|m| m.model_type.clone());
-                let sprites = resolve_png_sprites(character, manifest_dir)?;
-                let assets = ResolvedCharacterAssets {
-                    character_id: character_id.clone(),
-                    display_name: character.display_name.clone(),
-                    model_type,
-                    closed: sprites.as_ref().map(|s| s.closed.display().to_string()),
-                    half: sprites.as_ref().map(|s| s.half.display().to_string()),
-                    open: sprites.as_ref().map(|s| s.open.display().to_string()),
-                };
-                (identity, Some(assets), false)
-            } else {
-                let identity = find_style_id(engine_speakers, speaker_cfg.voice.speaker_id)
-                    .ok_or_else(|| {
-                        invalid_style_id(workspace, key, speaker_cfg.voice.speaker_id, engine_speakers)
                     })?;
-                report.warnings.push(SpeakerProfileWarning {
+
+            let identity = if let Some(voice) = &character.voice {
+                find_named_voice(engine_speakers, &voice.speaker, &voice.style).ok_or_else(
+                    || AppError::VoicevoxSpeakerNotFound {
+                        speaker: voice.speaker.clone(),
+                        style: voice.style.clone(),
+                        known: describe_speakers(engine_speakers),
+                    },
+                )?
+            } else {
+                find_style_id(engine_speakers, speaker_cfg.voice.speaker_id).ok_or_else(|| {
+                    invalid_style_id(
+                        workspace,
+                        key,
+                        speaker_cfg.voice.speaker_id,
+                        engine_speakers,
+                    )
+                })?
+            };
+
+            let manifest_dir = loaded.path.parent().unwrap_or_else(|| Path::new("."));
+            let model_type = character.model.as_ref().map(|m| m.model_type.clone());
+            let sprites = resolve_png_sprites(character, manifest_dir)?;
+            let assets = ResolvedCharacterAssets {
+                character_id: character_id.clone(),
+                display_name: character.display_name.clone(),
+                model_type,
+                closed: sprites.as_ref().map(|s| s.closed.display().to_string()),
+                half: sprites.as_ref().map(|s| s.half.display().to_string()),
+                open: sprites.as_ref().map(|s| s.open.display().to_string()),
+            };
+            (identity, Some(assets), false)
+        } else {
+            let identity = find_style_id(engine_speakers, speaker_cfg.voice.speaker_id)
+                .ok_or_else(|| {
+                    invalid_style_id(
+                        workspace,
+                        key,
+                        speaker_cfg.voice.speaker_id,
+                        engine_speakers,
+                    )
+                })?;
+            report.warnings.push(SpeakerProfileWarning {
                     speaker_key: key.clone(),
                     message: format!(
                         "speaker `{key}` uses legacy numeric-only VOICEVOX style id {}; it currently resolves to `{}` / `{}`. Pin identity with character_id + character_manifest before relying on the script-visible name `{display_name}`",
                         identity.style_id, identity.speaker, identity.style
                     ),
                 });
-                (identity, None, true)
-            };
+            (identity, None, true)
+        };
 
         report.profiles.push(SpeakerProfile {
             key: key.clone(),
@@ -199,7 +212,11 @@ fn find_style_id(speakers: &[Speaker], style_id: u32) -> Option<ResolvedVoiceIde
     })
 }
 
-fn find_named_voice(speakers: &[Speaker], name: &str, style: &str) -> Option<ResolvedVoiceIdentity> {
+fn find_named_voice(
+    speakers: &[Speaker],
+    name: &str,
+    style: &str,
+) -> Option<ResolvedVoiceIdentity> {
     speakers
         .iter()
         .find(|speaker| speaker.name == name)
@@ -237,7 +254,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::init;
-    use crate::tts::{SpeakerStyle, VoiceParams};
+    use crate::tts::SpeakerStyle;
 
     fn workspace_with_config(yaml: &str) -> (tempfile::TempDir, Workspace, Config) {
         let dir = tempfile::tempdir().unwrap();
@@ -287,12 +304,13 @@ mod tests {
 
     #[test]
     fn missing_numeric_style_is_a_typed_invalid_config() {
-        let (_dir, ws, cfg) = workspace_with_config(
-            "speakers:\n  narrator:\n    voice:\n      speaker_id: 9999\n",
-        );
+        let (_dir, ws, cfg) =
+            workspace_with_config("speakers:\n  narrator:\n    voice:\n      speaker_id: 9999\n");
         let err = resolve_speaker_profiles_from_list(&cfg, &ws, &engine()).unwrap_err();
         assert_eq!(err.code(), "invalid_config");
-        assert!(err.to_string().contains("speakers.narrator.voice.speaker_id"));
+        assert!(err
+            .to_string()
+            .contains("speakers.narrator.voice.speaker_id"));
         assert!(err.to_string().contains("9999"));
     }
 
