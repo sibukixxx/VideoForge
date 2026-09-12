@@ -381,8 +381,31 @@ fn character_inspect_json_reports_expressions_and_motions() {
     let character = &payload["characters"][0];
     assert_eq!(character["id"], "mock");
     assert_eq!(character["voice"]["speaker"], "Fake");
-    assert_eq!(character["model"]["expressions"][1], "smile");
-    assert_eq!(character["model"]["motions"][1], "Wave");
+    assert_eq!(character["model"]["type"], "live2d");
+    assert_eq!(character["model"]["live2d"]["expressions"][1], "smile");
+    assert_eq!(character["model"]["live2d"]["motions"][1], "Wave");
+}
+
+#[test]
+fn character_inspect_reports_png_lipsync_sprites() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest = repo_root().join("fixtures/character/mock-png-character/manifest.yaml");
+    let (code, stdout, stderr) = run(
+        tmp.path(),
+        &["--json", "character", "inspect", manifest.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect(&stdout);
+    let characters = payload["characters"].as_array().unwrap();
+    assert_eq!(characters.len(), 2);
+    let a = characters.iter().find(|c| c["id"] == "mock_a").unwrap();
+    assert_eq!(a["ok"], true);
+    assert_eq!(a["model"]["type"], "png_lipsync");
+    assert!(a["model"]["png_lipsync"]["closed"]
+        .as_str()
+        .unwrap()
+        .ends_with("closed.png"));
+    assert_eq!(a["model"]["png_lipsync"]["dimensions_mismatched"], false);
 }
 
 #[test]
@@ -489,4 +512,74 @@ fn generate_with_a_linked_character_produces_a_performance_track_and_lipsync_fil
     assert_eq!(clip["motion"], "Wave");
     let lip_sync_rel = clip["lip_sync"].as_str().unwrap();
     assert!(out_dir.join(lip_sync_rel).is_file(), "{lip_sync_rel}");
+}
+
+/// P0-1 acceptance shape end-to-end through the CLI: two speakers, each
+/// linked to a `png_lipsync` character, produce a `character_performance`
+/// track with one clip per dialogue, each carrying the placement resolved
+/// from `presentation` (left/right) — everything a renderer needs to draw
+/// "whoever is speaking has a moving mouth, the other stays closed".
+#[test]
+fn generate_with_two_png_lipsync_characters_places_each_at_its_own_position() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("demo");
+    let png_fixture = repo_root().join("fixtures/character/mock-png-character");
+
+    let (code, stdout, stderr) = run(tmp.path(), &["init", "demo"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+
+    let dest_sprites = ws.join("characters/sprites");
+    std::fs::create_dir_all(&dest_sprites).unwrap();
+    std::fs::copy(
+        png_fixture.join("manifest.yaml"),
+        ws.join("characters/manifest.yaml"),
+    )
+    .unwrap();
+    for name in ["closed.png", "half.png", "open.png"] {
+        std::fs::copy(
+            png_fixture.join("sprites").join(name),
+            dest_sprites.join(name),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        ws.join("videoforge.yaml"),
+        "character_manifest: characters/manifest.yaml\nspeakers:\n  mock_a:\n    character_id: mock_a\n  mock_b:\n    character_id: mock_b\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("scripts/dialogue.md"),
+        "mock_a:\nAが話しています。\n\nmock_b:\nBが話しています。\n",
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = run(
+        &ws,
+        &["generate", "scripts/dialogue.md", "--fake-tts", "--json"],
+    );
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let gen: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let out_dir = PathBuf::from(gen["output_dir"].as_str().unwrap());
+
+    let project: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out_dir.join("project.vfp.json")).unwrap())
+            .unwrap();
+    let perf_track = project["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["kind"] == "character_performance")
+        .expect("a character_performance track");
+    let clips = perf_track["clips"].as_array().unwrap();
+    assert_eq!(clips.len(), 2);
+    assert_eq!(clips[0]["character"], "mock_a");
+    assert_eq!(clips[1]["character"], "mock_b");
+    let x_a = clips[0]["transform"]["x"].as_f64().unwrap();
+    let x_b = clips[1]["transform"]["x"].as_f64().unwrap();
+    assert!(x_a < x_b, "mock_a (left) must sit left of mock_b (right)");
+    // Each clip is anchored to its own dialogue's schedule, not overlapping —
+    // a renderer showing "closed" outside a character's own clips will
+    // therefore show exactly one moving mouth at a time.
+    let end_a = clips[0]["start_ms"].as_u64().unwrap() + clips[0]["duration_ms"].as_u64().unwrap();
+    assert!(end_a <= clips[1]["start_ms"].as_u64().unwrap());
 }

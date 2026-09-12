@@ -1,0 +1,34 @@
+# Synthetic 3-state PNG character manifest used by VideoForge's own test
+# suite (P0-1, docs/character-system.md). The sprites under `sprites/` are
+# tiny generated checkerboards with a real alpha channel, not artwork of any
+# kind — no copyrighted character material is committed to this repository.
+characters:
+  - id: mock_a
+    display_name: "Mock A"
+    voice:
+      provider: voicevox
+      speaker: "Fake"
+      style: "silence"
+    model:
+      type: png_lipsync
+      closed: ./sprites/closed.png
+      half: ./sprites/half.png
+      open: ./sprites/open.png
+    presentation:
+      position: left
+      scale: 0.8
+
+  - id: mock_b
+    display_name: "Mock B"
+    voice:
+      provider: voicevox
+      speaker: "Fake"
+      style: "silence"
+    model:
+      type: png_lipsync
+      closed: ./sprites/closed.png
+      half: ./sprites/half.png
+      open: ./sprites/open.png
+    presentation:
+      position: right
+      scale: 0.8

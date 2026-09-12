@@ -616,13 +616,32 @@ struct CharacterVoiceReport {
 }
 
 #[derive(Serialize)]
-struct CharacterModelReport {
-    #[serde(rename = "type")]
-    model_type: String,
+struct Live2dModelReport {
     path: String,
     resolved_path: PathBuf,
     expressions: Vec<String>,
     motions: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct PngLipsyncModelReport {
+    closed: PathBuf,
+    half: PathBuf,
+    open: PathBuf,
+    /// The three sprites don't share the same pixel dimensions — not an
+    /// error, but the character will visibly jump when the renderer swaps
+    /// mouth states.
+    dimensions_mismatched: bool,
+}
+
+#[derive(Serialize)]
+struct CharacterModelReport {
+    #[serde(rename = "type")]
+    model_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live2d: Option<Live2dModelReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    png_lipsync: Option<PngLipsyncModelReport>,
     error: Option<String>,
 }
 
@@ -696,32 +715,61 @@ async fn build_character_reports(
             None
         };
 
-        let model = if let Some(m) = &c.model {
-            let resolved_path = m.resolve_path(manifest_dir);
-            match videoforge_character::live2d::load_model3_json(&resolved_path) {
-                Ok(info) => Some(CharacterModelReport {
-                    model_type: m.model_type.clone(),
-                    path: m.path.clone(),
-                    resolved_path,
-                    expressions: info.expressions,
-                    motions: info.motions,
-                    error: None,
-                }),
-                Err(e) => {
-                    ok = false;
-                    Some(CharacterModelReport {
+        let model = c.model.as_ref().map(|m| {
+            if m.is_png_lipsync() {
+                match videoforge_character::png_lipsync::load_png_lipsync_assets(m, manifest_dir) {
+                    Ok(assets) => CharacterModelReport {
                         model_type: m.model_type.clone(),
-                        path: m.path.clone(),
-                        resolved_path,
-                        expressions: Vec::new(),
-                        motions: Vec::new(),
-                        error: Some(e.to_string()),
-                    })
+                        live2d: None,
+                        png_lipsync: Some(PngLipsyncModelReport {
+                            closed: m.resolve_closed(manifest_dir).unwrap_or_default(),
+                            half: m.resolve_half(manifest_dir).unwrap_or_default(),
+                            open: m.resolve_open(manifest_dir).unwrap_or_default(),
+                            dimensions_mismatched: assets.dimensions_mismatched(),
+                        }),
+                        error: None,
+                    },
+                    Err(e) => {
+                        ok = false;
+                        CharacterModelReport {
+                            model_type: m.model_type.clone(),
+                            live2d: None,
+                            png_lipsync: None,
+                            error: Some(e.to_string()),
+                        }
+                    }
+                }
+            } else {
+                let resolved_path = m.resolve_path(manifest_dir);
+                match videoforge_character::live2d::load_model3_json(&resolved_path) {
+                    Ok(info) => CharacterModelReport {
+                        model_type: m.model_type.clone(),
+                        live2d: Some(Live2dModelReport {
+                            path: m.path.clone().unwrap_or_default(),
+                            resolved_path,
+                            expressions: info.expressions,
+                            motions: info.motions,
+                        }),
+                        png_lipsync: None,
+                        error: None,
+                    },
+                    Err(e) => {
+                        ok = false;
+                        CharacterModelReport {
+                            model_type: m.model_type.clone(),
+                            live2d: Some(Live2dModelReport {
+                                path: m.path.clone().unwrap_or_default(),
+                                resolved_path,
+                                expressions: Vec::new(),
+                                motions: Vec::new(),
+                            }),
+                            png_lipsync: None,
+                            error: Some(e.to_string()),
+                        }
+                    }
                 }
             }
-        } else {
-            None
-        };
+        });
 
         out.push(CharacterEntryReport {
             id: c.id.clone(),
@@ -754,19 +802,28 @@ fn print_character_report(r: &CharacterEntryReport, checked: bool) {
         }
     }
     if let Some(m) = &r.model {
-        println!("  model: {} at {}", m.model_type, m.resolved_path.display());
-        match &m.error {
-            Some(e) => println!("    ! {e}"),
-            None => {
-                let list = |v: &[String]| {
-                    if v.is_empty() {
-                        "(none declared)".to_string()
-                    } else {
-                        v.join(", ")
-                    }
-                };
-                println!("    expressions: {}", list(&m.expressions));
-                println!("    motions:     {}", list(&m.motions));
+        println!("  model: {}", m.model_type);
+        if let Some(e) = &m.error {
+            println!("    ! {e}");
+        }
+        if let Some(l) = &m.live2d {
+            println!("    path: {}", l.resolved_path.display());
+            let list = |v: &[String]| {
+                if v.is_empty() {
+                    "(none declared)".to_string()
+                } else {
+                    v.join(", ")
+                }
+            };
+            println!("    expressions: {}", list(&l.expressions));
+            println!("    motions:     {}", list(&l.motions));
+        }
+        if let Some(p) = &m.png_lipsync {
+            println!("    closed: {}", p.closed.display());
+            println!("    half:   {}", p.half.display());
+            println!("    open:   {}", p.open.display());
+            if p.dimensions_mismatched {
+                println!("    ! closed/half/open sprites have different pixel dimensions (the character will jump when the mouth state changes)");
             }
         }
     }

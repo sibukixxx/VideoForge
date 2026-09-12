@@ -1641,6 +1641,7 @@ name = "videoforge-preview"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-util",

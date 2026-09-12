@@ -146,6 +146,8 @@ pub fn validate_script(
         }
     };
     let mut model_cache: HashMap<String, Result<Live2dModelInfo, String>> = HashMap::new();
+    let mut png_cache: HashMap<String, Result<videoforge_character::PngLipsyncAssets, String>> =
+        HashMap::new();
 
     let known = config.known_speaker_names().join(", ");
     for d in &script.dialogues {
@@ -157,6 +159,7 @@ pub fn validate_script(
                     resolved.config,
                     character_manifest.as_ref(),
                     &mut model_cache,
+                    &mut png_cache,
                     &mut report,
                 );
                 report.total_chars += d.text.chars().count();
@@ -233,12 +236,14 @@ struct CharacterPerformance {
 /// character, `expression=`/`motion=` are checked against that character's
 /// known list (explicit, or read from its Live2D `model3.json`) instead of
 /// being warned about, and any other attribute still warns.
+#[allow(clippy::too_many_arguments)]
 fn resolve_character_performance(
     d: &Dialogue,
     speaker_key: &str,
     speaker_config: &SpeakerConfig,
     character_manifest: Option<&LoadedManifest>,
     model_cache: &mut HashMap<String, Result<Live2dModelInfo, String>>,
+    png_cache: &mut HashMap<String, Result<videoforge_character::PngLipsyncAssets, String>>,
     report: &mut ValidationReport,
 ) -> CharacterPerformance {
     let warn_unsupported = |report: &mut ValidationReport, key: &str| {
@@ -290,24 +295,38 @@ fn resolve_character_performance(
         };
     };
 
-    let model_info: Option<Live2dModelInfo> = if let Some(model) = &character.model {
-        let manifest_dir = loaded.path.parent().unwrap_or_else(|| Path::new("."));
-        let result = model_cache.entry(character_id.clone()).or_insert_with(|| {
-            let resolved_path = model.resolve_path(manifest_dir);
-            live2d::load_model3_json(&resolved_path).map_err(|e| e.to_string())
-        });
-        match result {
-            Ok(info) => Some(info.clone()),
-            Err(reason) => {
-                report.errors.push(ValidationIssue::new(
-                    Some(d.line),
-                    format!("character `{character_id}` Live2D model: {reason}"),
-                ));
-                None
+    let manifest_dir = loaded.path.parent().unwrap_or_else(|| Path::new("."));
+    let model_info: Option<Live2dModelInfo> = match &character.model {
+        Some(model) if model.is_live2d() => {
+            let result = model_cache.entry(character_id.clone()).or_insert_with(|| {
+                let resolved_path = model.resolve_path(manifest_dir);
+                live2d::load_model3_json(&resolved_path).map_err(|e| e.to_string())
+            });
+            match result {
+                Ok(info) => Some(info.clone()),
+                Err(reason) => {
+                    report.errors.push(ValidationIssue::new(
+                        Some(d.line),
+                        format!("character `{character_id}` Live2D model: {reason}"),
+                    ));
+                    None
+                }
             }
         }
-    } else {
-        None
+        Some(model) if model.is_png_lipsync() => {
+            let result = png_cache.entry(character_id.clone()).or_insert_with(|| {
+                videoforge_character::png_lipsync::load_png_lipsync_assets(model, manifest_dir)
+                    .map_err(|e| e.to_string())
+            });
+            if let Err(reason) = result {
+                report.errors.push(ValidationIssue::new(
+                    Some(d.line),
+                    format!("character `{character_id}` PNG sprites: {reason}"),
+                ));
+            }
+            None
+        }
+        _ => None,
     };
 
     let known_expressions: Vec<&str> = if !character.expressions.is_empty() {
@@ -552,6 +571,54 @@ mod tests {
             .errors
             .iter()
             .any(|e| e.message.contains("unknown character") && e.message.contains("ghost")));
+    }
+
+    fn png_character_workspace() -> (tempfile::TempDir, Workspace, Config) {
+        let dir = tempfile::tempdir().unwrap();
+        init::init(dir.path(), Some("t")).unwrap();
+        let fixture = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/character/mock-png-character"
+        ));
+        let dest_sprites = dir.path().join("characters/sprites");
+        std::fs::create_dir_all(&dest_sprites).unwrap();
+        std::fs::copy(
+            fixture.join("manifest.yaml"),
+            dir.path().join("characters/manifest.yaml"),
+        )
+        .unwrap();
+        for name in ["closed.png", "half.png", "open.png"] {
+            std::fs::copy(fixture.join("sprites").join(name), dest_sprites.join(name)).unwrap();
+        }
+        let yaml = "character_manifest: characters/manifest.yaml\nspeakers:\n  mock_a:\n    character_id: mock_a\n  mock_b:\n    character_id: mock_b\n";
+        std::fs::write(dir.path().join("videoforge.yaml"), yaml).unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let cfg = Config::parse(yaml, dir.path()).unwrap();
+        (dir, ws, cfg)
+    }
+
+    #[test]
+    fn png_lipsync_character_dialogue_validates() {
+        let (_d, ws, cfg) = png_character_workspace();
+        let script =
+            videoforge_script::parse_str("mock_a:\nこんにちは\n\nmock_b:\nやあ\n").unwrap();
+        let report = validate_script(&script, &cfg, &ws);
+        assert!(report.is_ok(), "{:?}", report.errors);
+        assert_eq!(report.dialogues[0].character_id.as_deref(), Some("mock_a"));
+        assert_eq!(report.dialogues[1].character_id.as_deref(), Some("mock_b"));
+    }
+
+    #[test]
+    fn png_lipsync_character_with_missing_sprite_is_a_validation_error() {
+        let (dir, ws, cfg) = png_character_workspace();
+        std::fs::remove_file(dir.path().join("characters/sprites/open.png")).unwrap();
+        let script = videoforge_script::parse_str("mock_a:\nこんにちは\n").unwrap();
+        let report = validate_script(&script, &cfg, &ws);
+        assert!(!report.is_ok());
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.message.contains("PNG sprites")));
     }
 
     #[test]

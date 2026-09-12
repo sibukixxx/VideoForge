@@ -8,11 +8,13 @@ YMM4 editor projects. See `README.md` for the user-facing quick start and script
 are headings in that design doc; look them up instead of guessing.
 
 A speaker can optionally link to a **character** (a VOICEVOX voice resolved by name, plus an
-optional Live2D model) for deterministic lip-sync data on the timeline — entirely additive, see
-`docs/character-system.md`. `docs/character-video-pipeline.md` and
-`docs/live2d-renderer-decision.md` cover the pipeline and the (not yet implemented) frame-rendering
-plan; `docs/character-licensing.md` tracks the unresolved licensing questions around any specific
-character/model a user configures.
+optional Live2D model or a `png_lipsync` 3-state PNG model) for deterministic lip-sync data on the
+timeline — entirely additive, see `docs/character-system.md`. A `png_lipsync` character is
+actually composited into `preview.mp4` (closed/half/open mouth sprites swapped by amplitude,
+`videoforge_preview::command::build_character_overlays`); Live2D still only produces timeline data.
+`docs/character-video-pipeline.md` and `docs/live2d-renderer-decision.md` cover the pipeline and
+the (not yet implemented) Live2D frame-rendering plan; `docs/character-licensing.md` tracks the
+unresolved licensing questions around any specific character/model a user configures.
 
 ## Commands
 
@@ -168,9 +170,12 @@ These span files and are easy to break silently:
   under `.github/workflows/`. Enabling it is a `git mv` (see `docs/ci/README.md`).
 - The Tauri GUI (`apps/desktop`) builds and its command layer is unit-tested, but it has not been
   launched on a real Windows or macOS desktop; the checklist is in `apps/desktop/README.md`.
-- The character/Live2D pipeline (`docs/character-system.md`) stops at a `character_performance`
-  timeline track and a deterministic lip-sync file — no Live2D frame is ever rendered, `preview.mp4`
-  does not reflect a character at all yet, and there is no GUI wiring (CLI-only). The renderer
-  direction is decided but not built; see `docs/live2d-renderer-decision.md`. The manual procedure
+- The Live2D half of the character pipeline (`docs/character-system.md`) stops at a
+  `character_performance` timeline track and a deterministic lip-sync file — no Live2D frame is
+  ever rendered, and there is no GUI wiring (CLI-only). The renderer direction is decided but not
+  built; see `docs/live2d-renderer-decision.md`. A `model.type: png_lipsync` character, by
+  contrast, **is** composited into `preview.mp4` (P0-1: 3-state closed/half/open PNG renderer,
+  `videoforge_preview::command::build_character_overlays`) — see "3-state PNG rendering" in
+  `docs/character-system.md`. Neither path has GUI wiring yet. The manual procedure
   (`docs/testing/character-manual-e2e.md`) has an empty results table — whoever runs it with a real
-  VOICEVOX character and Live2D model fills that in.
+  VOICEVOX character (and, for the PNG path, real closed/half/open artwork) fills that in.

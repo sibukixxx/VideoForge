@@ -2,9 +2,12 @@
 
 How the character/Live2D feature (`docs/character-system.md`) fits into
 VideoForge's existing generation pipeline (`core::generate::generate`,
-documented in `CLAUDE.md`). This is the P0 vertical slice: everything below
-is implemented and tested up to "a `character_performance` track with a
-lip-sync file on disk"; frame rendering and FFmpeg composition are Phase 1
+documented in `CLAUDE.md`). The pipeline below produces a
+`character_performance` track with a lip-sync file on disk for *every*
+character, Live2D or `png_lipsync` alike; a `png_lipsync` character is then
+also composited into `preview.mp4` by `videoforge-preview` (P0-1, see
+"3-state PNG rendering" in `docs/character-system.md`). Live2D frame
+rendering and FFmpeg composition are still Phase 1
 (`docs/live2d-renderer-decision.md`).
 
 ## Where it sits in `generate()`
@@ -50,8 +53,13 @@ Timeline (videoforge_timeline::build)
 Project IR (project.vfp.json) + captions.srt (unchanged consumers)
   │
   ▼
-Preview (FFmpeg) — unaware of the new track; renders exactly as before.
-  │
+Preview (FFmpeg)
+  │  • Live2D characters: unaware of the new track, renders exactly as before.
+  │  • `png_lipsync` characters (P0-1): `PreviewRequest::character_sprites`
+  │    resolves each character's closed/half/open PNGs (outside the project
+  │    IR, like `preview.font`); `videoforge-preview` overlays them onto the
+  │    background before the caption `drawtext` chain, time-windowed by that
+  │    character's own lip-sync curve.
   ▼
 manifest.json
 ```
@@ -90,7 +98,8 @@ already own.
   "character": "tsumugi",
   "expression": "smile",
   "motion": "idle",
-  "lip_sync": "assets/character/tsumugi/lipsync-001.json"
+  "lip_sync": "assets/character/tsumugi/lipsync-001.json",
+  "transform": { "x": 0.2, "y": 0.8, "scale": 0.8, "rotation_deg": 0.0, "opacity": 1.0, "layer": 0, "fit": "contain" }
 }
 ```
 
@@ -98,6 +107,14 @@ already own.
 reference in the project IR (forward slashes, relative to the project
 directory, no `..`) — resolved via `Clip::asset()`, so it participates in
 `VideoProject::referenced_assets()` like any other clip's source file.
+
+`transform` (P0-1) is the same `Transform` every `ImageClip`/`CharacterClip`
+already carries — `#[serde(default)]`, so a `project.vfp.json` written before
+P0-1 still loads (additive, no `SCHEMA_VERSION` bump). It comes from
+`core::character::presentation_transform`, mapping the character manifest's
+`presentation.{position,scale}` onto `x`/`scale`, with `y` fixed near the
+bottom of the frame. Every performance clip for the same character carries
+an identical `transform` — it describes the character, not the dialogue.
 
 ## `LipSyncTrack` shape (the referenced file's contents)
 
@@ -116,7 +133,11 @@ Deterministic and derived purely from the dialogue's own WAV — see
 `docs/character-system.md`'s "Lip sync" section for the amplitude method and
 why phoneme analysis is explicitly out of scope for P0 (design §10, §30).
 
-## Phase 1: what plugs in next, and where
+## Phase 1: what plugs in next, and where (Live2D only)
+
+`png_lipsync` is already fully plugged in (P0-1, see
+`docs/character-system.md`'s "3-state PNG rendering"); what follows is
+specific to the still-unimplemented Live2D frame-rendering path.
 
 Per `docs/live2d-renderer-decision.md`, a `CharacterRenderer` trait
 (mirroring `TtsEngine`/`PreviewRenderer`) will consume exactly the data this

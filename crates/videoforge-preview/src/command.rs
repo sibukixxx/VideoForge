@@ -8,15 +8,86 @@
 //! [`quote_filter_value`], whose escaping rules are documented there and
 //! verified against a real FFmpeg in `tests/ffmpeg_real.rs`.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use videoforge_core::preview::PreviewRequest;
-use videoforge_core::project::VideoProject;
+use videoforge_core::lipsync::{mouth_segments, LipSyncTrack, MouthState};
+use videoforge_core::preview::{CharacterSpriteSet, PreviewRequest};
+use videoforge_core::project::{Transform, VideoProject};
 use videoforge_core::AppError;
 
 pub const AUDIO_SAMPLE_RATE: u32 = 48000;
 pub const FADE_SECS: f64 = 0.3;
+/// A `png_lipsync` character sprite is scaled to this fraction of the frame
+/// height at `presentation.scale == 1.0` (P0-1). Hard-coded but named, same
+/// reasoning as the lip-sync amplitude thresholds in `core::lipsync`.
+pub const CHARACTER_BASE_HEIGHT_FRACTION: f64 = 0.62;
+
+/// One character's overlay plan: where its sprites go, and when `half`/
+/// `open` should cover the always-present `closed` base layer. `closed` has
+/// no window list because it is the base layer for the character's entire
+/// on-screen presence — the same reason an inactive speaker in the P0-1
+/// acceptance scenario reads as "closed", not "absent".
+#[derive(Debug, Clone, PartialEq)]
+pub struct CharacterOverlayPlan {
+    pub character: String,
+    pub closed: PathBuf,
+    pub half: PathBuf,
+    pub open: PathBuf,
+    pub transform: Transform,
+    /// Timeline windows (ms) where the half-open sprite covers `closed`.
+    pub half_windows: Vec<(u64, u64)>,
+    /// Timeline windows (ms) where the fully-open sprite covers `closed`.
+    pub open_windows: Vec<(u64, u64)>,
+}
+
+/// Read every performance clip's lip-sync curve for each sprite-resolved
+/// character and turn it into overlay windows. The only filesystem access
+/// in this module — mirrors `RenderPlan::write_caption_files` being the only
+/// filesystem access for captions; `RenderPlan::build` itself stays pure.
+pub fn build_character_overlays(
+    project: &VideoProject,
+    project_dir: &Path,
+    sprites: &BTreeMap<String, CharacterSpriteSet>,
+) -> Result<Vec<CharacterOverlayPlan>, AppError> {
+    let mut overlays = Vec::with_capacity(sprites.len());
+    for (character_id, sprite_set) in sprites {
+        let clips: Vec<_> = project
+            .character_performance_clips()
+            .into_iter()
+            .filter(|c| &c.character == character_id)
+            .collect();
+        let Some(first) = clips.first() else {
+            continue;
+        };
+        let mut half_windows = Vec::new();
+        let mut open_windows = Vec::new();
+        for clip in &clips {
+            let path = clip.lip_sync.resolve(project_dir);
+            let bytes = std::fs::read(&path).map_err(|e| AppError::read(&path, e))?;
+            let track: LipSyncTrack = serde_json::from_slice(&bytes)
+                .map_err(|e| AppError::serialization(path.display().to_string(), e))?;
+            for seg in mouth_segments(&track, clip.start_ms, clip.duration_ms) {
+                match seg.state {
+                    MouthState::Half => half_windows.push((seg.start_ms, seg.end_ms)),
+                    MouthState::Open => open_windows.push((seg.start_ms, seg.end_ms)),
+                    MouthState::Closed => {}
+                }
+            }
+        }
+        overlays.push(CharacterOverlayPlan {
+            character: character_id.clone(),
+            closed: sprite_set.closed.clone(),
+            half: sprite_set.half.clone(),
+            open: sprite_set.open.clone(),
+            transform: first.transform,
+            half_windows,
+            open_windows,
+        });
+    }
+    Ok(overlays)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaptionPlan {
@@ -47,6 +118,9 @@ pub struct RenderPlan {
     pub scratch_dir: PathBuf,
     /// `scratch_dir` relative to the project dir.
     pub scratch_rel: String,
+    /// `png_lipsync` character overlays (P0-1). Empty for a project that
+    /// uses no character, or only Live2D ones.
+    pub character_overlays: Vec<CharacterOverlayPlan>,
 }
 
 impl RenderPlan {
@@ -61,6 +135,11 @@ impl RenderPlan {
                 request.project_dir.display()
             ))
         })?;
+        let character_overlays = build_character_overlays(
+            request.project,
+            request.project_dir,
+            request.character_sprites,
+        )?;
         Ok(Self::build(
             request.project,
             request.background_color,
@@ -68,9 +147,11 @@ impl RenderPlan {
             request.output.to_path_buf(),
             scratch_dir.to_path_buf(),
             scratch_rel,
+            character_overlays,
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         project: &VideoProject,
         background_color: &str,
@@ -78,6 +159,7 @@ impl RenderPlan {
         output: PathBuf,
         scratch_dir: PathBuf,
         scratch_rel: String,
+        character_overlays: Vec<CharacterOverlayPlan>,
     ) -> Self {
         let background = project
             .background_clips()
@@ -117,6 +199,7 @@ impl RenderPlan {
             output,
             scratch_dir,
             scratch_rel,
+            character_overlays,
         }
     }
 
@@ -147,14 +230,135 @@ impl RenderPlan {
         (usable / self.caption_font_size() as f64).floor().max(8.0) as usize
     }
 
+    /// Pixel height of the bottom "caption safe area" (speaker label +
+    /// caption text + their margins), measured from the bottom edge. Shared
+    /// by the caption `drawtext` y-position and the character overlay
+    /// clamp below, so a character can never be placed under the captions —
+    /// structural, not incidental (P0-1: "字幕との重なりを考慮できる構造").
+    fn caption_safe_area_px(&self) -> u32 {
+        (self.height as f64 * 0.20).round() as u32 + self.speaker_font_size() + 16
+    }
+
+    /// Target pixel height for a character sprite at the given
+    /// `presentation.scale`, clamped so it can never be taller than the area
+    /// above the caption safe zone (P0-1: "frame外にはみ出さない" for the
+    /// vertical axis; see `overlay_position_exprs` for the horizontal one).
+    fn character_target_height_px(&self, scale: f32) -> u32 {
+        let max_h = self
+            .height
+            .saturating_sub(self.caption_safe_area_px())
+            .max(8);
+        let raw = (self.height as f64 * CHARACTER_BASE_HEIGHT_FRACTION * scale.max(0.0) as f64)
+            .round() as u32;
+        raw.clamp(8, max_h)
+    }
+
+    /// FFmpeg `overlay` x/y expressions placing a character at `transform`'s
+    /// normalized centre (same semantics as every other clip's `Transform`),
+    /// clamped to stay fully inside the frame and above the caption safe
+    /// area. `overlay_w`/`overlay_h` are resolved by FFmpeg at run time from
+    /// the actual scaled sprite, so this does not need to know pixel sizes.
+    fn overlay_position_exprs(&self, transform: &Transform) -> (String, String) {
+        let safe_area = self.caption_safe_area_px();
+        let x = format!(
+            "min(max(0,{:.4}*main_w-overlay_w/2),main_w-overlay_w)",
+            transform.x
+        );
+        let y = format!(
+            "min(max(0,{:.4}*main_h-overlay_h/2),main_h-{safe_area}-overlay_h)",
+            transform.y
+        );
+        (x, y)
+    }
+
+    /// One `overlay` filter's `enable` value from a set of timeline windows,
+    /// merged with `+` (FFmpeg's boolean OR) — mirrors how caption `enable`
+    /// windows are built, just with more than one interval.
+    fn enable_windows_expr(windows: &[(u64, u64)]) -> String {
+        windows
+            .iter()
+            .map(|(s, e)| format!("between(t,{},{})", ms_to_secs(*s), ms_to_secs(*e)))
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+
+    /// Character overlay filter chain: `closed` is always on for the
+    /// character's full on-screen presence (an inactive speaker's default
+    /// pose); `half`/`open` cover it only during their amplitude-derived
+    /// windows. Returns the filters to append and the label the next stage
+    /// (captions/fade) should read from — `input_label` unchanged when there
+    /// are no character overlays at all.
+    fn character_filters(&self, input_label: &str) -> (Vec<String>, String) {
+        let mut filters = Vec::new();
+        let mut current = input_label.to_string();
+        for (i, ov) in self.character_overlays.iter().enumerate() {
+            let target_h = self.character_target_height_px(ov.transform.scale);
+            let (x, y) = self.overlay_position_exprs(&ov.transform);
+            let base_input = 1 + self.audio.len() + i * 3;
+            let layer = |filters: &mut Vec<String>,
+                         current: &mut String,
+                         suffix: &str,
+                         input_index: usize,
+                         enable: Option<&str>| {
+                let scaled = format!("cov{i}{suffix}");
+                filters.push(format!("[{input_index}:v]scale=-2:{target_h}[{scaled}]"));
+                let next = format!("cov{i}{suffix}out");
+                let enable_clause = enable.map(|e| format!(":enable='{e}'")).unwrap_or_default();
+                filters.push(format!(
+                    "[{current}][{scaled}]overlay=x={x}:y={y}{enable_clause}[{next}]"
+                ));
+                *current = next;
+            };
+            layer(&mut filters, &mut current, "closed", base_input, None);
+            if !ov.half_windows.is_empty() {
+                let enable = Self::enable_windows_expr(&ov.half_windows);
+                layer(
+                    &mut filters,
+                    &mut current,
+                    "half",
+                    base_input + 1,
+                    Some(&enable),
+                );
+            }
+            if !ov.open_windows.is_empty() {
+                let enable = Self::enable_windows_expr(&ov.open_windows);
+                layer(
+                    &mut filters,
+                    &mut current,
+                    "open",
+                    base_input + 2,
+                    Some(&enable),
+                );
+            }
+        }
+        (filters, current)
+    }
+
+    /// Every character overlay's sprite paths, in the exact order
+    /// `character_filters` assigns FFmpeg input indices to them — shared by
+    /// `build_args` so the two never drift apart.
+    pub fn character_input_paths(&self) -> Vec<&Path> {
+        self.character_overlays
+            .iter()
+            .flat_map(|ov| [ov.closed.as_path(), ov.half.as_path(), ov.open.as_path()])
+            .collect()
+    }
+
+    /// Full `-filter_complex` video graph. When there are no character
+    /// overlays this is exactly the single `[0:v]...[v]` chain it has always
+    /// been; character overlays (P0-1) turn it into a small multi-node graph
+    /// — background, then each character composited on top in order, then
+    /// the same caption/fade chain applied last so captions always draw over
+    /// a character, never under it (P0-1: "字幕との重なりを考慮できる構造").
     pub fn video_filter(&self) -> String {
         let (w, h) = (self.width, self.height);
-        let mut chain = vec![
+        let base = [
             format!("scale={w}:{h}:force_original_aspect_ratio=decrease"),
             format!("pad={w}:{h}:(ow-iw)/2:(oh-ih)/2"),
             "setsar=1".to_string(),
             "format=yuv420p".to_string(),
         ];
+
         let font = self
             .font
             .as_ref()
@@ -164,28 +368,39 @@ impl RenderPlan {
         let speaker_size = self.speaker_font_size();
         let caption_y = format!("h-{}", (h as f64 * 0.20).round() as u32);
         let speaker_y = format!("h-{}", (h as f64 * 0.20).round() as u32 + speaker_size + 16);
+        let mut tail = Vec::new();
         for c in &self.captions {
             let enable = format!(
                 "enable='between(t,{},{})'",
                 ms_to_secs(c.start_ms),
                 ms_to_secs(c.end_ms)
             );
-            chain.push(format!(
+            tail.push(format!(
                 "drawtext=textfile={}{font}:fontsize={speaker_size}:fontcolor=white:box=1:boxcolor=0x000000AA:boxborderw=10:x=(w-text_w)/2:y={speaker_y}:{enable}",
                 quote_filter_value(&c.speaker_file)
             ));
-            chain.push(format!(
+            tail.push(format!(
                 "drawtext=textfile={}{font}:fontsize={caption_size}:fontcolor=white:borderw=3:bordercolor=black:line_spacing=8:text_align=center:x=(w-text_w)/2:y={caption_y}:{enable}",
                 quote_filter_value(&c.text_file)
             ));
         }
         let total = self.total_ms as f64 / 1000.0;
-        chain.push(format!("fade=t=in:st=0:d={FADE_SECS}"));
-        chain.push(format!(
+        tail.push(format!("fade=t=in:st=0:d={FADE_SECS}"));
+        tail.push(format!(
             "fade=t=out:st={}:d={FADE_SECS}",
             fmt_secs((total - FADE_SECS).max(0.0))
         ));
-        format!("[0:v]{}[v]", chain.join(","))
+
+        if self.character_overlays.is_empty() {
+            let chain: Vec<String> = base.into_iter().chain(tail).collect();
+            return format!("[0:v]{}[v]", chain.join(","));
+        }
+
+        let mut parts = vec![format!("[0:v]{}[bg0]", base.join(","))];
+        let (overlay_filters, post_overlay_label) = self.character_filters("bg0");
+        parts.extend(overlay_filters);
+        parts.push(format!("[{post_overlay_label}]{}[v]", tail.join(",")));
+        parts.join(";")
     }
 
     pub fn audio_filter(&self) -> String {
@@ -244,6 +459,23 @@ pub fn build_args(plan: &RenderPlan) -> Vec<OsString> {
     for (path, _) in &plan.audio {
         args.push("-i".into());
         args.push(path.into());
+    }
+    // remaining inputs: character sprites (closed/half/open per character,
+    // P0-1), absolute paths — like the font, these live outside the project
+    // dir and outside the filter graph string, so no escaping is needed;
+    // order must match `RenderPlan::character_filters`'s input-index math.
+    for path in plan.character_input_paths() {
+        args.extend(
+            [
+                "-loop",
+                "1",
+                "-framerate",
+                &plan.fps.to_string(),
+                "-i",
+                &path.to_string_lossy(),
+            ]
+            .map(OsString::from),
+        );
     }
 
     let filter = format!("{};{}", plan.video_filter(), plan.audio_filter());
@@ -457,6 +689,7 @@ mod tests {
             PathBuf::from("/out/preview.mp4"),
             PathBuf::from("/proj/.preview.mp4.tmp"),
             ".preview.mp4.tmp".into(),
+            Vec::new(),
         )
     }
 
@@ -510,6 +743,7 @@ mod tests {
             "o.mp4".into(),
             "/p/.t".into(),
             ".t".into(),
+            Vec::new(),
         );
         assert!(plan.audio_filter().ends_with("[a1]anull[aout]"));
         assert_eq!(plan.background_color, "black");
@@ -609,6 +843,7 @@ mod tests {
             root.join("preview.mp4"),
             scratch.clone(),
             relative_to(&scratch, &root).unwrap(),
+            Vec::new(),
         );
         assert_eq!(plan.scratch_rel, ".preview.mp4.tmp");
         let args: Vec<String> = build_args(&plan)
@@ -629,5 +864,237 @@ mod tests {
         );
         // Background and audio inputs are plain relative arguments too.
         assert!(args.contains(&"assets/background/default.png".to_string()));
+    }
+
+    // ------------------------------------------------------- character overlays (P0-1)
+
+    fn character_overlay(
+        name: &str,
+        x: f32,
+        half_windows: Vec<(u64, u64)>,
+        open_windows: Vec<(u64, u64)>,
+    ) -> CharacterOverlayPlan {
+        CharacterOverlayPlan {
+            character: name.into(),
+            closed: PathBuf::from(format!("/sprites/{name}/closed.png")),
+            half: PathBuf::from(format!("/sprites/{name}/half.png")),
+            open: PathBuf::from(format!("/sprites/{name}/open.png")),
+            transform: Transform {
+                x,
+                y: 0.8,
+                scale: 1.0,
+                ..Transform::default()
+            },
+            half_windows,
+            open_windows,
+        }
+    }
+
+    fn plan_with_overlays(overlays: Vec<CharacterOverlayPlan>) -> RenderPlan {
+        RenderPlan::build(
+            &project(false),
+            "#000000",
+            None,
+            "o.mp4".into(),
+            "/p/.t".into(),
+            ".t".into(),
+            overlays,
+        )
+    }
+
+    #[test]
+    fn video_filter_with_no_overlays_is_the_original_single_chain() {
+        let plan = plan_with_overlays(Vec::new());
+        let fc = plan.video_filter();
+        assert!(fc.starts_with("[0:v]scale="));
+        assert!(fc.ends_with("[v]"));
+        assert!(!fc.contains("overlay="));
+    }
+
+    #[test]
+    fn video_filter_composites_character_before_captions() {
+        let overlay = character_overlay("a", 0.2, vec![(100, 200)], vec![(200, 300)]);
+        let plan = plan_with_overlays(vec![overlay]);
+        let fc = plan.video_filter();
+
+        // background scaled onto its own label, not directly into the tail chain
+        assert!(fc.contains("[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[bg0]"));
+        // closed layer has no `enable` — always on
+        assert!(fc.contains("overlay=x=") && fc.contains("[cov0closedout]"));
+        let closed_overlay_stmt = fc
+            .split(';')
+            .find(|s| s.contains("[cov0closed]") && s.contains("overlay="))
+            .unwrap();
+        assert!(
+            !closed_overlay_stmt.contains("enable="),
+            "{closed_overlay_stmt}"
+        );
+        // half/open layers are time-windowed
+        assert!(fc.contains("enable='between(t,0.1,0.2)'"));
+        assert!(fc.contains("enable='between(t,0.2,0.3)'"));
+        // captions/fade apply to the post-overlay label, so they draw on top
+        assert!(fc.contains("[cov0openout]drawtext="));
+        assert!(fc.ends_with("[v]"));
+    }
+
+    #[test]
+    fn video_filter_merges_multiple_windows_with_plus() {
+        let overlay = character_overlay("a", 0.5, vec![(0, 50), (100, 150)], Vec::new());
+        let plan = plan_with_overlays(vec![overlay]);
+        let fc = plan.video_filter();
+        assert!(
+            fc.contains("enable='between(t,0,0.05)+between(t,0.1,0.15)'"),
+            "{fc}"
+        );
+    }
+
+    #[test]
+    fn video_filter_omits_half_or_open_layer_when_its_window_list_is_empty() {
+        let overlay = character_overlay("a", 0.5, Vec::new(), vec![(0, 50)]);
+        let plan = plan_with_overlays(vec![overlay]);
+        let fc = plan.video_filter();
+        assert!(!fc.contains("cov0half"), "{fc}");
+        assert!(fc.contains("cov0open"), "{fc}");
+    }
+
+    #[test]
+    fn character_input_paths_orders_closed_half_open_per_character_in_order() {
+        let plan = plan_with_overlays(vec![
+            character_overlay("a", 0.2, vec![], vec![]),
+            character_overlay("b", 0.8, vec![], vec![]),
+        ]);
+        let paths: Vec<String> = plan
+            .character_input_paths()
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                "/sprites/a/closed.png",
+                "/sprites/a/half.png",
+                "/sprites/a/open.png",
+                "/sprites/b/closed.png",
+                "/sprites/b/half.png",
+                "/sprites/b/open.png",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_args_places_character_inputs_after_audio_inputs_at_the_indices_the_graph_expects() {
+        // `project(false)` has 2 audio clips → inputs 0 (background) 1,2
+        // (audio) → character sprites start at input 3.
+        let plan = plan_with_overlays(vec![character_overlay("a", 0.5, vec![(0, 50)], vec![])]);
+        let args: Vec<String> = build_args(&plan)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args.iter()
+                .filter(|a| a.as_str() == "/sprites/a/closed.png")
+                .count(),
+            1
+        );
+        let fc = &args[args.iter().position(|x| x == "-filter_complex").unwrap() + 1];
+        assert!(fc.contains("[3:v]scale=-2:"), "{fc}"); // closed
+        assert!(fc.contains("[4:v]scale=-2:"), "{fc}"); // half
+        assert!(!fc.contains("[5:v]scale=-2:"), "{fc}"); // open window is empty, no `open` layer
+    }
+
+    #[test]
+    fn overlay_position_clamps_and_uses_normalized_transform() {
+        let plan = plan_with_overlays(Vec::new());
+        let (x, y) = plan.overlay_position_exprs(&Transform {
+            x: 0.5,
+            y: 0.9,
+            ..Transform::default()
+        });
+        assert!(x.contains("0.5000*main_w"));
+        assert!(y.contains("0.9000*main_h"));
+        assert!(y.contains("main_h-")); // clamped against the caption safe area
+    }
+
+    #[test]
+    fn character_target_height_scales_with_presentation_scale_and_is_clamped() {
+        let plan = plan_with_overlays(Vec::new());
+        let base = plan.character_target_height_px(1.0);
+        let half = plan.character_target_height_px(0.5);
+        assert!(half < base);
+        // absurd scale never exceeds the area above the caption safe zone
+        let huge = plan.character_target_height_px(100.0);
+        assert!(huge <= plan.height - plan.caption_safe_area_px());
+        // zero/negative scale never collapses to 0 (a visible sprite, however small)
+        assert!(plan.character_target_height_px(0.0) >= 8);
+    }
+
+    #[test]
+    fn build_character_overlays_reads_lipsync_curves_into_windows() {
+        use videoforge_core::lipsync::LipSyncTrack;
+        use videoforge_core::preview::CharacterSpriteSet;
+
+        let dir = tempfile::tempdir().unwrap();
+        let lipsync_dir = dir.path().join("assets/character/mock_a");
+        std::fs::create_dir_all(&lipsync_dir).unwrap();
+        let track = LipSyncTrack {
+            interval_ms: 50,
+            samples: vec![
+                videoforge_core::lipsync::LipSyncSample {
+                    t_ms: 0,
+                    mouth_open: 0.0,
+                },
+                videoforge_core::lipsync::LipSyncSample {
+                    t_ms: 50,
+                    mouth_open: 0.9,
+                },
+            ],
+        };
+        std::fs::write(
+            lipsync_dir.join("lipsync-001.json"),
+            track.to_json().unwrap(),
+        )
+        .unwrap();
+
+        let mut p = project(false);
+        p.tracks.push(Track {
+            id: "character_performance".into(),
+            kind: TrackKind::CharacterPerformance,
+            clips: vec![Clip::CharacterPerformance(
+                videoforge_core::project::CharacterPerformanceClip {
+                    id: "cp-001".into(),
+                    start_ms: 1000,
+                    duration_ms: 100,
+                    character: "mock_a".into(),
+                    expression: "default".into(),
+                    motion: "idle".into(),
+                    lip_sync: RelativeAssetPath::new("assets/character/mock_a/lipsync-001.json")
+                        .unwrap(),
+                    transform: Transform {
+                        x: 0.2,
+                        ..Transform::default()
+                    },
+                    extra: BTreeMap::new(),
+                },
+            )],
+        });
+
+        let mut sprites = BTreeMap::new();
+        sprites.insert(
+            "mock_a".to_string(),
+            CharacterSpriteSet {
+                closed: PathBuf::from("/sprites/closed.png"),
+                half: PathBuf::from("/sprites/half.png"),
+                open: PathBuf::from("/sprites/open.png"),
+            },
+        );
+
+        let overlays = build_character_overlays(&p, dir.path(), &sprites).unwrap();
+        assert_eq!(overlays.len(), 1);
+        let ov = &overlays[0];
+        assert_eq!(ov.character, "mock_a");
+        assert_eq!(ov.transform.x, 0.2);
+        assert!(ov.half_windows.is_empty());
+        // sample at 1050ms (clip start 1000 + t_ms 50) with mouth_open 0.9 → open
+        assert_eq!(ov.open_windows, vec![(1050, 1100)]);
     }
 }

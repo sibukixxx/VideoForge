@@ -139,6 +139,11 @@ pub struct CharacterPerformanceInput {
     pub expression: String,
     pub motion: String,
     pub lip_sync: RelativeAssetPath,
+    /// On-screen placement (P0-1), identical for every performance input
+    /// sharing the same `character` — resolved once from the character
+    /// manifest's `presentation` by `core::character`, not derived here.
+    #[serde(default)]
+    pub transform: Transform,
 }
 
 /// Where each dialogue landed on the timeline.
@@ -251,6 +256,7 @@ pub fn build(input: TimelineInput) -> Result<VideoProject, TimelineError> {
             expression: cp.expression.clone(),
             motion: cp.motion.clone(),
             lip_sync: cp.lip_sync.clone(),
+            transform: cp.transform,
             extra: BTreeMap::new(),
         }));
     }
@@ -669,6 +675,10 @@ mod tests {
                     expression: "smile".into(),
                     motion: "wave".into(),
                     lip_sync: asset("assets/character/tsumugi/lipsync-001.json"),
+                    transform: Transform {
+                        x: 0.2,
+                        ..Transform::default()
+                    },
                 },
                 CharacterPerformanceInput {
                     index: 2,
@@ -676,6 +686,7 @@ mod tests {
                     expression: "default".into(),
                     motion: "idle".into(),
                     lip_sync: asset("assets/character/tsumugi/lipsync-002.json"),
+                    transform: Transform::default(),
                 },
             ],
             options: TimelineOptions::default(),
@@ -688,6 +699,11 @@ mod tests {
         assert_eq!(clips[0].duration_ms, 1000);
         assert_eq!(clips[0].expression, "smile");
         assert_eq!(clips[0].motion, "wave");
+        assert_eq!(
+            clips[0].transform.x, 0.2,
+            "transform passes through from input"
+        );
+        assert_eq!(clips[1].transform, Transform::default());
         // gap of 200ms between dialogues (TimelineOptions::default())
         assert_eq!(clips[1].start_ms, 1200);
         assert_eq!(clips[1].duration_ms, 500);
@@ -719,6 +735,7 @@ mod tests {
                 expression: "default".into(),
                 motion: "idle".into(),
                 lip_sync: asset("assets/character/tsumugi/lipsync-009.json"),
+                transform: Transform::default(),
             }],
             options: TimelineOptions::default(),
         })

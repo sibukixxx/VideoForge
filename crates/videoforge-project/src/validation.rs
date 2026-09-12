@@ -299,6 +299,7 @@ mod tests {
                 expression: "default".into(),
                 motion: "idle".into(),
                 lip_sync: RelativeAssetPath::new("assets/lipsync/001.json").unwrap(),
+                transform: crate::project::Transform::default(),
                 extra: BTreeMap::new(),
             })],
         });

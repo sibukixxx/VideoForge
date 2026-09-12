@@ -260,7 +260,17 @@ async fn run_pipeline(
     // `character_performance` track is emitted at all.
     let character_manifest = crate::character::load_manifest(config, workspace)?;
     let mut character_performance = Vec::new();
+    // Absolute PNG sprite paths for every `png_lipsync` character that
+    // performs in this project, keyed by character id — passed to the
+    // preview renderer below exactly like `preview.font`: never copied into
+    // `generated/`, resolved fresh from the (separate, reusable) character
+    // manifest every run.
+    let mut character_sprites: std::collections::BTreeMap<
+        String,
+        crate::preview::CharacterSpriteSet,
+    > = std::collections::BTreeMap::new();
     if let Some(loaded) = &character_manifest {
+        let manifest_dir = loaded.path.parent().unwrap_or_else(|| Path::new("."));
         let by_index: std::collections::HashMap<usize, &validate::ResolvedDialogue> =
             report.dialogues.iter().map(|d| (d.index, d)).collect();
         for s in &synthesized {
@@ -291,6 +301,15 @@ async fn run_pipeline(
                 .map_err(|e| AppError::serialization("lipsync", e))?;
             std::fs::write(&path, json).map_err(|e| AppError::write(&path, e))?;
             let rel = RelativeAssetPath::new(format!("assets/character/{character_id}/{file}"))?;
+            if let Some(sprites) = crate::character::resolve_png_sprites(character, manifest_dir)? {
+                character_sprites
+                    .entry(character_id.clone())
+                    .or_insert_with(|| crate::preview::CharacterSpriteSet {
+                        closed: sprites.closed,
+                        half: sprites.half,
+                        open: sprites.open,
+                    });
+            }
             character_performance.push(CharacterPerformanceInput {
                 index: s.index,
                 character: character_id.clone(),
@@ -303,6 +322,7 @@ async fn run_pipeline(
                     .clone()
                     .unwrap_or_else(|| "idle".to_string()),
                 lip_sync: rel,
+                transform: crate::character::presentation_transform(character),
             });
         }
     }
@@ -412,6 +432,7 @@ async fn run_pipeline(
                             output: &output,
                             font: font.as_deref(),
                             background_color: &config.preview.background_color,
+                            character_sprites: &character_sprites,
                             cancel: cancel.clone(),
                         })
                         .await?;
@@ -646,6 +667,74 @@ mod tests {
         let track: crate::lipsync::LipSyncTrack =
             serde_json::from_str(&std::fs::read_to_string(&lipsync_path).unwrap()).unwrap();
         assert!(!track.samples.is_empty());
+    }
+
+    /// P0-1 acceptance shape: two speakers, each linked to a `png_lipsync`
+    /// character, in one script. `preview.mp4` compositing itself is tested
+    /// in `videoforge-preview` (offline, at the FFmpeg-command level); this
+    /// proves the pipeline up to `project.vfp.json` produces exactly the
+    /// per-character data (transform + sprite resolution) that renderer
+    /// needs: A's performance clip only where A speaks, B's only where B
+    /// speaks, both with a resolved `png_lipsync` sprite set.
+    #[tokio::test]
+    async fn end_to_end_with_two_png_lipsync_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        init::init(dir.path(), Some("t")).unwrap();
+
+        let fixture = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/character/mock-png-character"
+        ));
+        let dest_sprites = dir.path().join("characters/sprites");
+        std::fs::create_dir_all(&dest_sprites).unwrap();
+        std::fs::copy(
+            fixture.join("manifest.yaml"),
+            dir.path().join("characters/manifest.yaml"),
+        )
+        .unwrap();
+        for name in ["closed.png", "half.png", "open.png"] {
+            std::fs::copy(fixture.join("sprites").join(name), dest_sprites.join(name)).unwrap();
+        }
+        std::fs::write(
+            dir.path().join("videoforge.yaml"),
+            "character_manifest: characters/manifest.yaml\nspeakers:\n  mock_a:\n    character_id: mock_a\n  mock_b:\n    character_id: mock_b\n",
+        )
+        .unwrap();
+
+        let ws = Workspace::open(dir.path()).unwrap();
+        let script = ws.scripts_dir().join("dialogue.md");
+        std::fs::write(
+            &script,
+            "mock_a:\nAが話しています。\n\nmock_b:\nBが話しています。\n",
+        )
+        .unwrap();
+
+        let deps = GenerateDeps::new(Arc::new(FakeTtsEngine::default()));
+        let out = generate(&ws, &script, GenerateOptions::default(), deps)
+            .await
+            .unwrap();
+
+        let project = VideoProject::load(&out.project_path).unwrap();
+        let perf = project.character_performance_clips();
+        assert_eq!(perf.len(), 2);
+        assert_eq!(perf[0].character, "mock_a");
+        assert_eq!(perf[1].character, "mock_b");
+        // left/right placement resolved from the manifest's presentation,
+        // not a shared default — this is what lets a renderer draw both
+        // characters on screen at once without one covering the other.
+        assert_ne!(perf[0].transform.x, perf[1].transform.x);
+        assert_eq!(
+            perf[0].transform.x,
+            crate::character::CHARACTER_POSITION_X_LEFT
+        );
+        assert_eq!(
+            perf[1].transform.x,
+            crate::character::CHARACTER_POSITION_X_RIGHT
+        );
+        // A's clip covers only A's dialogue span, not B's — so a renderer
+        // that shows "closed" outside a character's own clips will draw B
+        // as closed while A speaks, and vice versa (P0-1 acceptance).
+        assert!(perf[0].start_ms + perf[0].duration_ms <= perf[1].start_ms);
     }
 
     /// `generated/<slug>.old-*` directories still on disk.

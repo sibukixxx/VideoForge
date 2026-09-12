@@ -328,6 +328,14 @@ pub struct CharacterPerformanceClip {
     /// audio (`core::lipsync::LipSyncTrack`, referenced rather than inlined
     /// so `project.vfp.json` stays small).
     pub lip_sync: RelativeAssetPath,
+    /// On-screen placement (P0-1), derived once from the character
+    /// manifest's `presentation` and repeated on every clip for that
+    /// character — same field, same coordinate system, as `ImageClip`/
+    /// `CharacterClip::transform`, not a second placement concept.
+    /// `#[serde(default)]` so older `project.vfp.json` files without this
+    /// field still load (additive, no `SCHEMA_VERSION` bump).
+    #[serde(default)]
+    pub transform: Transform,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -712,6 +720,7 @@ mod tests {
                 motion: "wave".into(),
                 lip_sync: RelativeAssetPath::new("assets/character/tsumugi/lipsync-001.json")
                     .unwrap(),
+                transform: Transform::default(),
                 extra: BTreeMap::new(),
             })],
         });

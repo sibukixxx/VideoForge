@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 videoforge-core = { workspace = true }
 async-trait = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 
