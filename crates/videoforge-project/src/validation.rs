@@ -133,6 +133,33 @@ pub fn validate_project(project: &VideoProject) -> ProjectValidationReport {
                     "start_ms + duration_ms exceeds u64".into(),
                 ),
             }
+            let mouth = match clip {
+                Clip::Character(character) => character.mouth.as_ref(),
+                _ => None,
+            };
+            if let Some(mouth) = mouth {
+                let starts_at_zero = mouth
+                    .cues
+                    .first()
+                    .map(|cue| cue.offset_ms == 0)
+                    .unwrap_or(false);
+                let strictly_increasing = mouth
+                    .cues
+                    .windows(2)
+                    .all(|pair| pair[0].offset_ms < pair[1].offset_ms);
+                let within_clip = mouth
+                    .cues
+                    .iter()
+                    .all(|cue| u64::from(cue.offset_ms) <= clip.duration_ms());
+                if !starts_at_zero || !strictly_increasing || !within_clip {
+                    report.error(
+                        "invalid_mouth_cues",
+                        format!("{clip_path}.mouth.cues"),
+                        "mouth cues must start at 0, increase strictly, and stay within the clip"
+                            .into(),
+                    );
+                }
+            }
         }
     }
 
