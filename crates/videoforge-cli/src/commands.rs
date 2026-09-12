@@ -889,3 +889,64 @@ pub async fn character_validate(
     }
     exit(if ok { 0 } else { 2 })
 }
+
+// ------------------------------------------------------------------ assets
+
+/// Resolve a user-given path to the `asset-registry.json` it names or sits
+/// next to: the file itself, its directory, or `project.vfp.json` (or any
+/// other file) in that same generated output directory.
+fn resolve_registry_path(input: &Path) -> PathBuf {
+    if input.is_dir() {
+        return input.join(core_generate::ASSET_REGISTRY_FILE);
+    }
+    if input.file_name().and_then(|n| n.to_str()) == Some(core_generate::ASSET_REGISTRY_FILE) {
+        return input.to_path_buf();
+    }
+    input
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(core_generate::ASSET_REGISTRY_FILE)
+}
+
+pub fn assets(ctx: &Context, project: PathBuf) -> anyhow::Result<ExitCode> {
+    let registry_path = resolve_registry_path(&project);
+    let registry = videoforge_core::assets::AssetRegistry::load(&registry_path)
+        .with_context(|| format!("asset registry: {}", registry_path.display()))?;
+    let missing = registry.missing();
+    let ok = missing.is_empty();
+
+    if ctx.json {
+        ctx.emit_json(&serde_json::json!({
+            "ok": ok,
+            "registry": registry_path,
+            "assets": registry.assets,
+        }))?;
+    } else {
+        println!("Asset registry: {}", registry_path.display());
+        for a in &registry.assets {
+            let mark = if a.exists() { "✓" } else { "✗" };
+            println!();
+            println!("{mark} {} ({:?})", a.id, a.kind);
+            println!(
+                "  provenance: {}  license: {}",
+                a.provenance, a.license_status
+            );
+            for f in &a.files {
+                let file_mark = if f.exists { "✓" } else { "✗" };
+                let hash = f.hash.as_deref().unwrap_or("-");
+                println!("  {file_mark} {}: {} ({hash})", f.role, f.path);
+            }
+        }
+        println!();
+        if ok {
+            println!("OK — {} asset(s), all present", registry.assets.len());
+        } else {
+            println!(
+                "FAILED — {} of {} asset(s) missing a file",
+                missing.len(),
+                registry.assets.len()
+            );
+        }
+    }
+    exit(if ok { 0 } else { 2 })
+}

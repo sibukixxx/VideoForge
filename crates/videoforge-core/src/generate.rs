@@ -60,6 +60,7 @@ pub const MANIFEST_FILE: &str = "manifest.json";
 pub const CAPTIONS_FILE: &str = "captions.srt";
 pub const PREVIEW_FILE: &str = "preview.mp4";
 pub const SOURCE_FILE: &str = "source.md";
+pub const ASSET_REGISTRY_FILE: &str = "asset-registry.json";
 
 #[derive(Clone)]
 pub struct GenerateOptions {
@@ -473,6 +474,16 @@ async fn run_pipeline(
     };
     manifest.save(&tmp_dir.join(MANIFEST_FILE))?;
 
+    // --- Asset registry (P0-2) --------------------------------------------
+    let character_manifest_ref = character_manifest.as_ref().map(|loaded| {
+        (
+            &loaded.manifest,
+            loaded.path.parent().unwrap_or_else(|| Path::new(".")),
+        )
+    });
+    let registry = crate::assets::build_registry(&project, tmp_dir, character_manifest_ref);
+    registry.save(&tmp_dir.join(ASSET_REGISTRY_FILE))?;
+
     Ok((project, manifest, preview_path))
 }
 
@@ -576,12 +587,29 @@ mod tests {
 
         assert_eq!(out.slug, "sample");
         assert_eq!(out.output_dir, ws.generated_dir().join("sample"));
-        for f in [PROJECT_FILE, MANIFEST_FILE, CAPTIONS_FILE, SOURCE_FILE] {
+        for f in [
+            PROJECT_FILE,
+            MANIFEST_FILE,
+            CAPTIONS_FILE,
+            SOURCE_FILE,
+            ASSET_REGISTRY_FILE,
+        ] {
             assert!(out.output_dir.join(f).is_file(), "{f}");
         }
         assert!(out.output_dir.join("assets/audio/001.wav").is_file());
         assert!(out.output_dir.join("assets/audio/003.wav").is_file());
         assert!(!ws.tmp_dir().exists(), "temp dir cleaned up");
+
+        let registry =
+            crate::assets::AssetRegistry::load(&out.output_dir.join(ASSET_REGISTRY_FILE)).unwrap();
+        assert_eq!(
+            registry.missing(),
+            Vec::<&crate::assets::AssetRecord>::new()
+        );
+        assert!(registry
+            .assets
+            .iter()
+            .any(|a| a.kind == crate::assets::AssetKind::Audio));
 
         let project = VideoProject::load(&out.project_path).unwrap();
         assert_eq!(project.audio_clips().len(), 3);
@@ -735,6 +763,21 @@ mod tests {
         // that shows "closed" outside a character's own clips will draw B
         // as closed while A speaks, and vice versa (P0-1 acceptance).
         assert!(perf[0].start_ms + perf[0].duration_ms <= perf[1].start_ms);
+
+        // The asset registry (P0-2) has one entry per character, each with
+        // its three sprite files present and hashed.
+        let registry =
+            crate::assets::AssetRegistry::load(&out.output_dir.join(ASSET_REGISTRY_FILE)).unwrap();
+        let character_entries: Vec<_> = registry
+            .assets
+            .iter()
+            .filter(|a| a.kind == crate::assets::AssetKind::Character)
+            .collect();
+        assert_eq!(character_entries.len(), 2);
+        for entry in &character_entries {
+            assert_eq!(entry.files.len(), 3);
+            assert!(entry.exists(), "{entry:?}");
+        }
     }
 
     /// `generated/<slug>.old-*` directories still on disk.

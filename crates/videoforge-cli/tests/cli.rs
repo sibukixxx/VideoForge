@@ -582,4 +582,28 @@ fn generate_with_two_png_lipsync_characters_places_each_at_its_own_position() {
     // therefore show exactly one moving mouth at a time.
     let end_a = clips[0]["start_ms"].as_u64().unwrap() + clips[0]["duration_ms"].as_u64().unwrap();
     assert!(end_a <= clips[1]["start_ms"].as_u64().unwrap());
+
+    // P0-2: the asset registry lists both characters' sprites as present,
+    // and `videoforge assets` reads it back given either the project file
+    // or its directory.
+    let out_dir = ws.join("generated/dialogue");
+    let (code, stdout, stderr) = run(
+        &ws,
+        &["--json", "assets", "generated/dialogue/project.vfp.json"],
+    );
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let payload: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(payload["ok"], true);
+    let entries = payload["assets"].as_array().unwrap();
+    let characters: Vec<&serde_json::Value> = entries
+        .iter()
+        .filter(|a| a["kind"] == "character")
+        .collect();
+    assert_eq!(characters.len(), 2);
+    for c in &characters {
+        assert_eq!(c["files"].as_array().unwrap().len(), 3);
+    }
+
+    let (code, _, _) = run(&ws, &["assets", out_dir.to_str().unwrap()]);
+    assert_eq!(code, 0, "assets command accepts a directory too");
 }

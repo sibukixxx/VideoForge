@@ -35,6 +35,8 @@ MVP v0.1 の **Core + CLI**（設計書 Phase 1〜6）と Tauri GUI MVP（Phase 
 | Handoff bundle（dir + zip） | ✅ |
 | Tauri GUI（`apps/desktop`: Workspace / Script / Validate / Generate + 進捗 / Preview / Doctor / YMM4 export or bundle） | ✅ MVP。実機での起動確認は `apps/desktop/README.md` のチェックリスト |
 | Character（VOICEVOX + Live2D / 3-state PNG）: 話者を character manifest にリンクし、名前ベースで VOICEVOX voice を解決、決定論的な lip-sync データを `character_performance` track として timeline に保持。`model.type: png_lipsync` は closed/half/open の透過 PNG を実際に `preview.mp4` へ合成する（P0-1）。`videoforge character inspect` / `validate` | ✅ Live2D は音声+lip-syncデータまで（フレーム描画は未実装）。PNG は合成まで実装済み — 詳細は `docs/character-system.md` |
+| Asset Registry（P0-2）: 生成物が依存するファイルを識別・存在確認・SHA256 ハッシュ化し `generated/<slug>/asset-registry.json` に保存。`videoforge assets <project.vfp.json>` | ✅ 最小実装（巨大な DAM は作らない） |
+| Doctor（P0-3）: VOICEVOX / FFmpeg / 出力ディレクトリ書き込み可否 / 空きディスク容量 / 出力設定 / character identity→voice→asset 解決を生成前に確認 | ✅ |
 
 ## Quick start
 

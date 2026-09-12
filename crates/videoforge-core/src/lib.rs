@@ -7,6 +7,7 @@
 //! Dependency rules (see design §28): this crate never depends on Tauri,
 //! Windows APIs, or the YMM4 schema.
 
+pub mod assets;
 pub mod capabilities;
 pub mod character;
 pub mod config;

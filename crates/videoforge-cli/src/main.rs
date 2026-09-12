@@ -88,6 +88,11 @@ enum Command {
         #[command(subcommand)]
         target: CharacterTarget,
     },
+    /// List a generated project's asset registry (identity, existence, hash, provenance)
+    Assets {
+        /// Path to project.vfp.json, or its directory, or asset-registry.json directly
+        project: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -261,6 +266,7 @@ async fn main() -> ExitCode {
                 commands::character_validate(&ctx, manifest, tts.fake_tts, tts.endpoint).await
             }
         },
+        Command::Assets { project } => commands::assets(&ctx, project),
     };
     match result {
         Ok(code) => code,
