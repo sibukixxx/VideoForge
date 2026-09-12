@@ -295,6 +295,11 @@ pub struct CharacterClip {
     /// Canonical speaker key (e.g. `reimu`) this stand-in represents, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker: Option<String>,
+    /// Optional three-state, amplitude-driven mouth animation. `source` is
+    /// the closed-mouth frame; this records the other two complete RGBA
+    /// frames and a run-length encoded state curve relative to `start_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mouth: Option<MouthAnimation>,
     #[serde(default)]
     pub transform: Transform,
     /// Semantic role / intent (issue #16); `None` when the author said nothing.
@@ -302,6 +307,28 @@ pub struct CharacterClip {
     pub presentation: Option<Presentation>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MouthAnimation {
+    pub half_source: RelativeAssetPath,
+    pub open_source: RelativeAssetPath,
+    pub cues: Vec<MouthCue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MouthState {
+    Closed,
+    Half,
+    Open,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MouthCue {
+    /// Offset from the character clip/dialogue start.
+    pub offset_ms: u32,
+    pub state: MouthState,
 }
 
 /// One dialogue's Live2D/VOICEVOX character performance: which character,
@@ -486,6 +513,12 @@ impl VideoProject {
     pub fn referenced_assets(&self) -> Vec<RelativeAssetPath> {
         let mut assets: Vec<RelativeAssetPath> =
             self.clips().filter_map(Clip::asset).cloned().collect();
+        for character in self.character_clips() {
+            if let Some(mouth) = &character.mouth {
+                assets.push(mouth.half_source.clone());
+                assets.push(mouth.open_source.clone());
+            }
+        }
         assets.sort();
         assets.dedup();
         assets
@@ -665,6 +698,7 @@ mod tests {
                 start_ms: 0,
                 duration_ms: 3410,
                 speaker: Some("reimu".into()),
+                mouth: None,
                 transform: Transform::default(),
                 presentation: None,
                 extra: BTreeMap::new(),
