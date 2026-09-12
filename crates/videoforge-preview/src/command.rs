@@ -30,6 +30,20 @@ pub struct CaptionPlan {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct CharacterPlan {
+    /// PNG or other still image, relative to the project directory.
+    pub source: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub x: f32,
+    pub y: f32,
+    pub scale: f32,
+    pub rotation_deg: f32,
+    pub opacity: f32,
+    pub layer: i32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RenderPlan {
     pub width: u32,
     pub height: u32,
@@ -40,6 +54,8 @@ pub struct RenderPlan {
     pub background_color: String,
     /// Relative audio paths and their start offsets.
     pub audio: Vec<(String, u64)>,
+    /// Static character images composited over the background and below captions.
+    pub characters: Vec<CharacterPlan>,
     pub captions: Vec<CaptionPlan>,
     pub font: Option<PathBuf>,
     pub output: PathBuf,
@@ -88,6 +104,22 @@ impl RenderPlan {
             .iter()
             .map(|a| (a.source.as_str().to_string(), a.start_ms))
             .collect();
+        let mut characters: Vec<CharacterPlan> = project
+            .character_clips()
+            .iter()
+            .map(|c| CharacterPlan {
+                source: c.source.as_str().to_string(),
+                start_ms: c.start_ms,
+                end_ms: c.start_ms.saturating_add(c.duration_ms),
+                x: c.transform.x.clamp(0.0, 1.0),
+                y: c.transform.y.clamp(0.0, 1.0),
+                scale: c.transform.scale.max(0.01),
+                rotation_deg: c.transform.rotation_deg,
+                opacity: c.transform.opacity.clamp(0.0, 1.0),
+                layer: c.transform.layer,
+            })
+            .collect();
+        characters.sort_by_key(|c| c.layer);
         let captions = project
             .caption_clips()
             .iter()
@@ -112,6 +144,7 @@ impl RenderPlan {
             background,
             background_color: normalize_color(background_color),
             audio,
+            characters,
             captions,
             font,
             output,
@@ -149,12 +182,48 @@ impl RenderPlan {
 
     pub fn video_filter(&self) -> String {
         let (w, h) = (self.width, self.height);
-        let mut chain = vec![
+        let base_chain = [
             format!("scale={w}:{h}:force_original_aspect_ratio=decrease"),
             format!("pad={w}:{h}:(ow-iw)/2:(oh-ih)/2"),
             "setsar=1".to_string(),
             "format=yuv420p".to_string(),
         ];
+        let mut parts = vec![format!("[0:v]{}[base]", base_chain.join(","))];
+        let mut current = "base".to_string();
+        for (i, character) in self.characters.iter().enumerate() {
+            let input = i + 1;
+            let prepared = format!("character{i}");
+            let next = format!("visual{i}");
+            let target_w = ((w as f32 * 0.45 * character.scale).round() as u32).max(1);
+            let target_h = ((h as f32 * 0.75 * character.scale).round() as u32).max(1);
+            let mut filters = vec![
+                format!(
+                    "scale={target_w}:{target_h}:force_original_aspect_ratio=decrease"
+                ),
+                "format=rgba".to_string(),
+                format!(
+                    "colorchannelmixer=aa={}",
+                    fmt_number(character.opacity as f64)
+                ),
+            ];
+            if character.rotation_deg.abs() > f32::EPSILON {
+                filters.push(format!(
+                    "rotate={}:ow=rotw(iw):oh=roth(ih):c=none",
+                    fmt_number(character.rotation_deg.to_radians() as f64)
+                ));
+            }
+            parts.push(format!("[{input}:v]{}[{prepared}]", filters.join(",")));
+            parts.push(format!(
+                "[{current}][{prepared}]overlay=x='W*{}-w/2':y='H*{}-h/2':enable='between(t,{},{})':eof_action=pass[{next}]",
+                fmt_number(character.x as f64),
+                fmt_number(character.y as f64),
+                ms_to_secs(character.start_ms),
+                ms_to_secs(character.end_ms)
+            ));
+            current = next;
+        }
+
+        let mut chain = Vec::new();
         let font = self
             .font
             .as_ref()
@@ -185,7 +254,8 @@ impl RenderPlan {
             "fade=t=out:st={}:d={FADE_SECS}",
             fmt_secs((total - FADE_SECS).max(0.0))
         ));
-        format!("[0:v]{}[v]", chain.join(","))
+        parts.push(format!("[{current}]{}[v]", chain.join(",")));
+        parts.join(";")
     }
 
     pub fn audio_filter(&self) -> String {
@@ -196,9 +266,9 @@ impl RenderPlan {
         let mut labels = Vec::new();
         for (i, (_, start)) in self.audio.iter().enumerate() {
             let label = format!("[a{}]", i + 1);
+            let input = 1 + self.characters.len() + i;
             parts.push(format!(
-                "[{}:a]aresample={AUDIO_SAMPLE_RATE},aformat=channel_layouts=stereo,adelay={start}:all=1{label}",
-                i + 1
+                "[{input}:a]aresample={AUDIO_SAMPLE_RATE},aformat=channel_layouts=stereo,adelay={start}:all=1{label}"
             ));
             labels.push(label);
         }
@@ -240,7 +310,21 @@ pub fn build_args(plan: &RenderPlan) -> Vec<OsString> {
             );
         }
     }
-    // inputs 1..N: audio
+    // inputs 1..M: transparent character stills
+    for character in &plan.characters {
+        args.extend(
+            [
+                "-loop",
+                "1",
+                "-framerate",
+                &plan.fps.to_string(),
+                "-i",
+                &character.source,
+            ]
+            .map(OsString::from),
+        );
+    }
+    // remaining inputs: audio
     for (path, _) in &plan.audio {
         args.push("-i".into());
         args.push(path.into());
@@ -287,6 +371,11 @@ fn fmt_secs(s: f64) -> String {
     } else {
         t.to_string()
     }
+}
+
+fn fmt_number(value: f64) -> String {
+    let text = format!("{value:.6}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// `#1e1e2e` → `0x1e1e2e`; names pass through.
@@ -381,8 +470,8 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use videoforge_core::project::{
-        AudioClip, BackgroundClip, CaptionClip, Clip, RelativeAssetPath, Track, TrackKind,
-        VideoSettings,
+        AudioClip, BackgroundClip, CaptionClip, CharacterClip, Clip, RelativeAssetPath, Track,
+        TrackKind, Transform, VideoSettings,
     };
 
     fn project(with_background: bool) -> VideoProject {
@@ -513,6 +602,64 @@ mod tests {
         );
         assert!(plan.audio_filter().ends_with("[a1]anull[aout]"));
         assert_eq!(plan.background_color, "black");
+    }
+
+    #[test]
+    fn transparent_character_png_is_composited_before_captions() {
+        let mut p = project(false);
+        p.tracks.push(Track {
+            id: "characters".into(),
+            kind: TrackKind::Character,
+            clips: vec![Clip::Character(CharacterClip {
+                id: "character-1".into(),
+                source: RelativeAssetPath::new("assets/character/zundamon/default.png").unwrap(),
+                start_ms: 200,
+                duration_ms: 3000,
+                speaker: Some("zundamon".into()),
+                transform: Transform {
+                    x: 0.8,
+                    y: 0.55,
+                    scale: 0.9,
+                    opacity: 0.8,
+                    layer: 2,
+                    ..Transform::default()
+                },
+                presentation: None,
+                extra: BTreeMap::new(),
+            })],
+        });
+        let plan = RenderPlan::build(
+            &p,
+            "black",
+            None,
+            "o.mp4".into(),
+            "/p/.t".into(),
+            ".t".into(),
+        );
+        let args = build_args(&plan);
+        let args: Vec<String> = args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(plan.characters.len(), 1);
+        assert!(args.contains(&"assets/character/zundamon/default.png".to_string()));
+        let fc = &args[args.iter().position(|x| x == "-filter_complex").unwrap() + 1];
+        assert!(
+            fc.contains("[1:v]scale=778:729:force_original_aspect_ratio=decrease,format=rgba,colorchannelmixer=aa=0.8[character0]"),
+            "{fc}"
+        );
+        assert!(
+            fc.contains("overlay=x='W*0.8-w/2':y='H*0.55-h/2':enable='between(t,0.2,3.2)'"),
+            "{fc}"
+        );
+        assert!(
+            fc.contains("[visual0]drawtext="),
+            "captions must render above the character: {fc}"
+        );
+        assert!(
+            fc.contains("[2:a]aresample="),
+            "audio input index must follow character inputs: {fc}"
+        );
     }
 
     #[test]
