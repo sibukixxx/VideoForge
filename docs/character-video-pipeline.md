@@ -5,6 +5,7 @@ VideoForge's existing generation pipeline (`core::generate::generate`,
 documented in `CLAUDE.md`). Two character paths are deliberately separate:
 
 - static transparent PNG stand-ins (`@character`) are composited by FFmpeg;
+- an optional closed/half/open PNG set follows the existing WAV amplitude curve;
 - Live2D models produce performance/lip-sync data, but frame rendering remains Phase 1
   (`docs/live2d-renderer-decision.md`).
 
@@ -53,6 +54,7 @@ Project IR (project.vfp.json) + captions.srt (unchanged consumers)
   ▼
 Preview (FFmpeg)
   • static CharacterClip PNGs are overlaid by start/duration and layer
+  • three-state mouth cues select closed/half/open complete PNG frames
   • alpha, position, scale, rotation and opacity are preserved
   • captions render above character PNGs
   • CharacterPerformanceClip / Live2D frames are not rendered yet
