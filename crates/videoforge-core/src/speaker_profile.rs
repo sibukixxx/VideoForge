@@ -6,6 +6,7 @@
 //! CLI/Tauri/preflight code should consume this module rather than attempting
 //! to re-resolve those pieces independently.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -103,11 +104,11 @@ pub fn resolve_speaker_profiles_from_list(
             &speaker_cfg.character_id
         {
             let loaded = loaded_manifest.as_ref().ok_or_else(|| AppError::InvalidConfig {
-                    path: workspace.root().join("videoforge.yaml"),
-                    reason: format!(
-                        "speakers.{key}.character_id is set but character_manifest could not be loaded"
-                    ),
-                })?;
+                path: workspace.root().join("videoforge.yaml"),
+                reason: format!(
+                    "speakers.{key}.character_id is set but character_manifest could not be loaded"
+                ),
+            })?;
             let character =
                 loaded
                     .manifest
@@ -159,12 +160,12 @@ pub fn resolve_speaker_profiles_from_list(
                     )
                 })?;
             report.warnings.push(SpeakerProfileWarning {
-                    speaker_key: key.clone(),
-                    message: format!(
-                        "speaker `{key}` uses legacy numeric-only VOICEVOX style id {}; it currently resolves to `{}` / `{}`. Pin identity with character_id + character_manifest before relying on the script-visible name `{display_name}`",
-                        identity.style_id, identity.speaker, identity.style
-                    ),
-                });
+                speaker_key: key.clone(),
+                message: format!(
+                    "speaker `{key}` uses legacy numeric-only VOICEVOX style id {}; it currently resolves to `{}` / `{}`. Pin identity with character_id + character_manifest before relying on the script-visible name `{display_name}`",
+                    identity.style_id, identity.speaker, identity.style
+                ),
+            });
             (identity, None, true)
         };
 
@@ -181,6 +182,68 @@ pub fn resolve_speaker_profiles_from_list(
     }
 
     Ok(report)
+}
+
+/// Fail closed before any TTS synthesis/output generation if configured
+/// identities are semantically inconsistent.
+///
+/// Rules are intentionally narrow so old numeric-only workspaces can still be
+/// migrated safely:
+/// - a legacy profile with no alias is allowed (identity cannot be inferred),
+///   but remains a warning in the report;
+/// - once aliases are present, at least one alias must equal the VOICEVOX
+///   speaker name that the numeric style id actually belongs to;
+/// - two distinct speaker keys must not resolve to the same VOICEVOX style id
+///   in one config. If two script names are the same voice, they should be
+///   aliases of one canonical speaker instead of independent profiles.
+///
+/// Character-linked profiles are already pinned by named speaker/style and do
+/// not use the alias-name check.
+pub fn ensure_generation_safe_profiles(
+    report: &SpeakerProfileReport,
+    workspace: &Workspace,
+) -> Result<(), AppError> {
+    let config_path = workspace.root().join("videoforge.yaml");
+    let mut style_owners: BTreeMap<u32, &str> = BTreeMap::new();
+
+    for profile in &report.profiles {
+        if let Some(previous) = style_owners.insert(profile.resolved_voice.style_id, &profile.key) {
+            if previous != profile.key {
+                return Err(AppError::InvalidConfig {
+                    path: config_path,
+                    reason: format!(
+                        "speaker profile mismatch: `{previous}` and `{}` both resolve to VOICEVOX style id {} (`{}` / `{}`). Use one canonical speaker with aliases, or assign different speaker/style identities",
+                        profile.key,
+                        profile.resolved_voice.style_id,
+                        profile.resolved_voice.speaker,
+                        profile.resolved_voice.style
+                    ),
+                });
+            }
+        }
+
+        if profile.legacy_unpinned_voice && !profile.aliases.is_empty() {
+            let voice_name_matches_alias = profile
+                .aliases
+                .iter()
+                .any(|alias| alias.trim() == profile.resolved_voice.speaker);
+            if !voice_name_matches_alias {
+                return Err(AppError::InvalidConfig {
+                    path: workspace.root().join("videoforge.yaml"),
+                    reason: format!(
+                        "speaker profile mismatch: `{}` has script aliases [{}], but VOICEVOX style id {} actually belongs to `{}` / `{}`. Refusing to generate audio under the wrong visible identity. Correct the style id/aliases, or pin the profile with character_id + character_manifest",
+                        profile.key,
+                        profile.aliases.join(", "),
+                        profile.resolved_voice.style_id,
+                        profile.resolved_voice.speaker,
+                        profile.resolved_voice.style
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn invalid_style_id(
@@ -300,6 +363,40 @@ mod tests {
         assert_eq!(report.warnings.len(), 1);
         assert!(report.warnings[0].message.contains("霊夢"));
         assert!(report.warnings[0].message.contains("四国めたん"));
+    }
+
+    #[test]
+    fn generation_guard_rejects_legacy_alias_voice_mismatch() {
+        let (_dir, ws, cfg) = workspace_with_config(
+            "speakers:\n  reimu:\n    aliases: [霊夢]\n    voice:\n      speaker_id: 2\n",
+        );
+        let report = resolve_speaker_profiles_from_list(&cfg, &ws, &engine()).unwrap();
+        let err = ensure_generation_safe_profiles(&report, &ws).unwrap_err();
+        assert_eq!(err.code(), "invalid_config");
+        assert!(err.to_string().contains("霊夢"));
+        assert!(err.to_string().contains("四国めたん"));
+        assert!(err.to_string().contains("Refusing to generate"));
+    }
+
+    #[test]
+    fn generation_guard_accepts_legacy_alias_when_it_matches_engine_identity() {
+        let (_dir, ws, cfg) = workspace_with_config(
+            "speakers:\n  zundamon:\n    aliases: [ずんだもん]\n    voice:\n      speaker_id: 3\n",
+        );
+        let report = resolve_speaker_profiles_from_list(&cfg, &ws, &engine()).unwrap();
+        ensure_generation_safe_profiles(&report, &ws).unwrap();
+    }
+
+    #[test]
+    fn generation_guard_rejects_duplicate_style_identity() {
+        let (_dir, ws, cfg) = workspace_with_config(
+            "speakers:\n  a:\n    voice:\n      speaker_id: 3\n  b:\n    voice:\n      speaker_id: 3\n",
+        );
+        let report = resolve_speaker_profiles_from_list(&cfg, &ws, &engine()).unwrap();
+        let err = ensure_generation_safe_profiles(&report, &ws).unwrap_err();
+        assert_eq!(err.code(), "invalid_config");
+        assert!(err.to_string().contains("both resolve"));
+        assert!(err.to_string().contains("style id 3"));
     }
 
     #[test]
