@@ -11,6 +11,11 @@ use crate::preview::PreviewRenderer;
 use crate::tts::TtsEngine;
 use crate::workspace::Workspace;
 
+/// Below this, `doctor` warns before a generate is attempted (P0-3). Not a
+/// hard engine limit — a short synthetic video's WAVs + preview.mp4 rarely
+/// exceed a few tens of MB, but leaves headroom for a longer real one.
+const MIN_FREE_DISK_BYTES: u64 = 500 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
@@ -268,6 +273,56 @@ pub async fn run(input: DoctorInput<'_>) -> DoctorReport {
         };
         push(&mut checks, "Output directory", status.0, status.1);
 
+        // Disk space (P0-3): a generate that runs out of space mid-render
+        // leaves a stray `.generated-tmp` directory and a confusing FFmpeg
+        // error; this catches the common case up front instead.
+        match fs4::available_space(&out) {
+            Ok(available) => {
+                let mb = available / (1024 * 1024);
+                if available < MIN_FREE_DISK_BYTES {
+                    push(
+                        &mut checks,
+                        "Disk space",
+                        CheckStatus::Warn,
+                        format!(
+                            "only {mb} MiB free at {} (recommend at least {} MiB)",
+                            out.display(),
+                            MIN_FREE_DISK_BYTES / (1024 * 1024)
+                        ),
+                    );
+                } else {
+                    push(
+                        &mut checks,
+                        "Disk space",
+                        CheckStatus::Ok,
+                        format!("{mb} MiB free at {}", out.display()),
+                    );
+                }
+            }
+            Err(e) => push(
+                &mut checks,
+                "Disk space",
+                CheckStatus::Warn,
+                format!("could not determine free space at {}: {e}", out.display()),
+            ),
+        }
+
+        // Output settings (P0-3): surfaces resolution/fps up front — actual
+        // per-script duration is unknown here (`doctor` takes no script),
+        // but a garbled `videoforge.yaml` value is worth flagging before a
+        // long TTS run rather than after.
+        if let Some(cfg) = &config {
+            push(
+                &mut checks,
+                "Output settings",
+                CheckStatus::Ok,
+                format!(
+                    "{}x{} @ {}fps",
+                    cfg.video.width, cfg.video.height, cfg.video.fps
+                ),
+            );
+        }
+
         // Template
         if let Some(cfg) = &config {
             match ws.resolve(&cfg.export.ymm4.template) {
@@ -401,6 +456,29 @@ mod tests {
             .checks
             .iter()
             .any(|c| c.name.starts_with("Character")));
+    }
+
+    #[tokio::test]
+    async fn reports_disk_space_and_output_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        init::init(dir.path(), Some("t")).unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let report = run_doctor(ws).await;
+
+        let disk = report
+            .checks
+            .iter()
+            .find(|c| c.name == "Disk space")
+            .expect("a Disk space check");
+        assert_ne!(disk.status, CheckStatus::Fail, "{}", disk.detail);
+
+        let output = report
+            .checks
+            .iter()
+            .find(|c| c.name == "Output settings")
+            .expect("an Output settings check");
+        assert_eq!(output.status, CheckStatus::Ok);
+        assert_eq!(output.detail, "1920x1080 @ 30fps");
     }
 
     #[tokio::test]
