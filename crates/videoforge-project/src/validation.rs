@@ -33,13 +33,7 @@ impl ProjectValidationReport {
         self.errors.is_empty()
     }
 
-    fn push(
-        &mut self,
-        severity: ValidationSeverity,
-        code: &str,
-        path: String,
-        message: String,
-    ) {
+    fn push(&mut self, severity: ValidationSeverity, code: &str, path: String, message: String) {
         let issue = ProjectValidationIssue {
             severity,
             code: code.into(),
@@ -329,7 +323,11 @@ mod tests {
         });
 
         let report = validate_project(&project);
-        let codes: Vec<&str> = report.errors.iter().map(|issue| issue.code.as_str()).collect();
+        let codes: Vec<&str> = report
+            .errors
+            .iter()
+            .map(|issue| issue.code.as_str())
+            .collect();
         assert_eq!(
             codes,
             vec![

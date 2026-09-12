@@ -78,18 +78,27 @@ fn invalid(message: impl Into<String>) -> AppError {
 
 impl Brief {
     pub fn validate(&self) -> Result<(), AppError> {
-        if self.topic.trim().is_empty() || self.audience.trim().is_empty()
-            || !(10..=1800).contains(&self.target_seconds) || self.sources.is_empty()
+        if self.topic.trim().is_empty()
+            || self.audience.trim().is_empty()
+            || !(10..=1800).contains(&self.target_seconds)
+            || self.sources.is_empty()
         {
-            return Err(invalid("topic, audience, sources and target_seconds (10..1800) required"));
+            return Err(invalid(
+                "topic, audience, sources and target_seconds (10..1800) required",
+            ));
         }
         let mut ids = BTreeSet::new();
         for source in &self.sources {
-            if source.id.trim().is_empty() || !ids.insert(&source.id)
-                || source.locator.trim().is_empty() || source.text.trim().is_empty()
-                || source.checked_at.trim().is_empty() || source.published_at.trim().is_empty()
+            if source.id.trim().is_empty()
+                || !ids.insert(&source.id)
+                || source.locator.trim().is_empty()
+                || source.text.trim().is_empty()
+                || source.checked_at.trim().is_empty()
+                || source.published_at.trim().is_empty()
             {
-                return Err(invalid("sources require unique IDs, locator, text and dates (or unknown)"));
+                return Err(invalid(
+                    "sources require unique IDs, locator, text and dates (or unknown)",
+                ));
             }
         }
         Ok(())
@@ -106,9 +115,12 @@ pub fn prompt(brief: &Brief, config: &Config) -> Result<String, AppError> {
 }
 
 /// Exact quotations prove traceability, NOT entailment or truth. Humans review both.
-pub fn check(brief: &Brief, draft: &Draft, config: &Config, ws: &Workspace)
-    -> Result<DraftReport, AppError>
-{
+pub fn check(
+    brief: &Brief,
+    draft: &Draft,
+    config: &Config,
+    ws: &Workspace,
+) -> Result<DraftReport, AppError> {
     brief.validate()?;
     let mut errors = Vec::new();
     let mut warnings = vec![
@@ -122,7 +134,9 @@ pub fn check(brief: &Brief, draft: &Draft, config: &Config, ws: &Workspace)
         errors.push("unresolved issues must be resolved before export".into());
     }
     if !draft.material_requests.is_empty() {
-        errors.push("material requests must be resolved before export; P0 does not insert assets".into());
+        errors.push(
+            "material requests must be resolved before export; P0 does not insert assets".into(),
+        );
     }
     let mut markdown = format!("---\ntitle: {}\n---\n\n", serde_json::json!(draft.title));
     let mut chars = 0usize;
@@ -131,23 +145,32 @@ pub fn check(brief: &Brief, draft: &Draft, config: &Config, ws: &Workspace)
         if config.resolve_speaker(&d.speaker).is_none() {
             errors.push(format!("dialogue {n}: unknown speaker"));
         }
-        if d.text.trim().is_empty() || d.text.contains(['\n', '\r'])
+        if d.text.trim().is_empty()
+            || d.text.contains(['\n', '\r'])
             || d.speaker.contains(['\n', '\r'])
         {
-            errors.push(format!("dialogue {n}: speaker/text must be nonempty single lines"));
+            errors.push(format!(
+                "dialogue {n}: speaker/text must be nonempty single lines"
+            ));
         }
         if d.text.chars().count() > 120 {
-            errors.push(format!("dialogue {n}: split text into at most 120 characters"));
+            errors.push(format!(
+                "dialogue {n}: split text into at most 120 characters"
+            ));
         }
         if d.kind == DialogueKind::Fact && d.evidence.is_empty() {
             errors.push(format!("dialogue {n}: facts require evidence"));
         }
         for evidence in &d.evidence {
-            let valid = !evidence.quote.trim().is_empty() && brief.sources.iter().any(|s| {
-                s.id == evidence.source_id && s.text.contains(&evidence.quote)
-            });
+            let valid = !evidence.quote.trim().is_empty()
+                && brief
+                    .sources
+                    .iter()
+                    .any(|s| s.id == evidence.source_id && s.text.contains(&evidence.quote));
             if !valid {
-                errors.push(format!("dialogue {n}: missing source or non-verbatim evidence"));
+                errors.push(format!(
+                    "dialogue {n}: missing source or non-verbatim evidence"
+                ));
             }
         }
         chars += d.text.chars().count();
@@ -156,12 +179,18 @@ pub fn check(brief: &Brief, draft: &Draft, config: &Config, ws: &Workspace)
     match crate::script::parse_str(&markdown) {
         Ok(script) => {
             if script.dialogues.len() != draft.dialogues.len()
-                || !script.directives.is_empty() || !script.warnings.is_empty()
-                || script.dialogues.iter().zip(&draft.dialogues).any(|(a, b)| {
-                    a.speaker != b.speaker || a.text != b.text
-                })
+                || !script.directives.is_empty()
+                || !script.warnings.is_empty()
+                || script
+                    .dialogues
+                    .iter()
+                    .zip(&draft.dialogues)
+                    .any(|(a, b)| a.speaker != b.speaker || a.text != b.text)
             {
-                errors.push("generated Markdown does not round-trip exactly; reserved syntax rejected".into());
+                errors.push(
+                    "generated Markdown does not round-trip exactly; reserved syntax rejected"
+                        .into(),
+                );
             }
             let report = crate::validate::validate_script(&script, config, ws);
             errors.extend(report.errors.into_iter().map(|e| e.message));
@@ -176,12 +205,17 @@ pub fn check(brief: &Brief, draft: &Draft, config: &Config, ws: &Workspace)
         warnings.push("estimated duration is outside target +/-20%; measure with real TTS".into());
     }
     // Bind review to source text, draft, configuration AND policy version.
-    let bytes = serde_json::to_vec(&(PROMPT, brief, draft, config))
-        .map_err(|e| invalid(e.to_string()))?;
+    let bytes =
+        serde_json::to_vec(&(PROMPT, brief, draft, config)).map_err(|e| invalid(e.to_string()))?;
     let review_hash = hex::encode(Sha256::digest(bytes));
     Ok(DraftReport {
-        structurally_valid: errors.is_empty(), review_hash, errors, warnings,
-        dialogue_count: draft.dialogues.len(), estimated_seconds,
-        target_seconds: brief.target_seconds, markdown,
+        structurally_valid: errors.is_empty(),
+        review_hash,
+        errors,
+        warnings,
+        dialogue_count: draft.dialogues.len(),
+        estimated_seconds,
+        target_seconds: brief.target_seconds,
+        markdown,
     })
 }

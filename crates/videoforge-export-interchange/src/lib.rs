@@ -22,8 +22,16 @@ pub struct InterchangeExporter {
 }
 
 impl InterchangeExporter {
-    pub fn fcpxml() -> Self { Self { format: InterchangeFormat::Fcpxml } }
-    pub fn otio() -> Self { Self { format: InterchangeFormat::Otio } }
+    pub fn fcpxml() -> Self {
+        Self {
+            format: InterchangeFormat::Fcpxml,
+        }
+    }
+    pub fn otio() -> Self {
+        Self {
+            format: InterchangeFormat::Otio,
+        }
+    }
 
     fn default_destination(&self, project_dir: &Path) -> PathBuf {
         match self.format {
@@ -36,22 +44,34 @@ impl InterchangeExporter {
 #[async_trait]
 impl ProjectExporter for InterchangeExporter {
     fn id(&self) -> &'static str {
-        match self.format { InterchangeFormat::Fcpxml => "fcpxml", InterchangeFormat::Otio => "otio" }
+        match self.format {
+            InterchangeFormat::Fcpxml => "fcpxml",
+            InterchangeFormat::Otio => "otio",
+        }
     }
 
     fn capabilities(&self) -> ExportCapabilities {
-        ExportCapabilities { available: true, reason: None, can_open: false }
+        ExportCapabilities {
+            available: true,
+            reason: None,
+            can_open: false,
+        }
     }
 
     async fn export(&self, request: ExportRequest<'_>) -> Result<ExportResult, AppError> {
-        let output = request.destination.map(Path::to_path_buf)
+        let output = request
+            .destination
+            .map(Path::to_path_buf)
             .unwrap_or_else(|| self.default_destination(request.project_dir));
         if let Some(parent) = output.parent() {
             std::fs::create_dir_all(parent).map_err(|e| AppError::write(parent, e))?;
         }
         let (body, warnings) = match self.format {
             InterchangeFormat::Fcpxml => render_fcpxml(request.project, request.project_dir),
-            InterchangeFormat::Otio => (render_otio(request.project, request.project_dir)?, Vec::new()),
+            InterchangeFormat::Otio => (
+                render_otio(request.project, request.project_dir)?,
+                Vec::new(),
+            ),
         };
         std::fs::write(&output, body).map_err(|e| AppError::write(&output, e))?;
         Ok(ExportResult { output, warnings })
@@ -59,7 +79,13 @@ impl ProjectExporter for InterchangeExporter {
 }
 
 fn project_duration_ms(project: &VideoProject) -> u64 {
-    project.tracks.iter().flat_map(|t| &t.clips).map(Clip::end_ms).max().unwrap_or(0)
+    project
+        .tracks
+        .iter()
+        .flat_map(|t| &t.clips)
+        .map(Clip::end_ms)
+        .max()
+        .unwrap_or(0)
 }
 
 fn asset_uri(project_dir: &Path, clip: &Clip) -> Option<String> {
@@ -70,10 +96,16 @@ fn asset_uri(project_dir: &Path, clip: &Clip) -> Option<String> {
 }
 
 fn esc_xml(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
-fn fcpx_time(ms: u64) -> String { format!("{ms}/1000s") }
+fn fcpx_time(ms: u64) -> String {
+    format!("{ms}/1000s")
+}
 
 fn render_fcpxml(project: &VideoProject, project_dir: &Path) -> (String, Vec<String>) {
     let mut warnings = Vec::new();
@@ -97,7 +129,10 @@ fn render_fcpxml(project: &VideoProject, project_dir: &Path) -> (String, Vec<Str
                     spine.push_str(&format!("        <asset-clip name=\"{}\" ref=\"{id}\" offset=\"{}\" duration=\"{}\"/>\n",
                         esc_xml(clip.id()), fcpx_time(clip.start_ms()), fcpx_time(clip.duration_ms())));
                 }
-                _ => warnings.push(format!("clip `{}` has no FCPXML representation and was skipped", clip.id())),
+                _ => warnings.push(format!(
+                    "clip `{}` has no FCPXML representation and was skipped",
+                    clip.id()
+                )),
             }
         }
     }
@@ -139,12 +174,43 @@ fn render_otio(project: &VideoProject, project_dir: &Path) -> Result<String, App
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
-    use videoforge_project::{CaptionClip, Track, TrackKind, VideoSettings, SourceInfo, SCHEMA_VERSION};
+    use videoforge_project::{
+        CaptionClip, SourceInfo, Track, TrackKind, VideoSettings, SCHEMA_VERSION,
+    };
 
     fn sample() -> VideoProject {
-        VideoProject { schema_version: SCHEMA_VERSION, id:"p1".into(), title:"P3 test".into(), video:VideoSettings::default(), source:SourceInfo::default(), tracks:vec![Track{id:"captions".into(),kind:TrackKind::Caption,clips:vec![Clip::Caption(CaptionClip{id:"c1".into(),text:"Hello & world".into(),start_ms:0,duration_ms:1000,speaker:"a".into(),speaker_display:None,extra:BTreeMap::new()})]}], extra:BTreeMap::new() }
+        VideoProject {
+            schema_version: SCHEMA_VERSION,
+            id: "p1".into(),
+            title: "P3 test".into(),
+            video: VideoSettings::default(),
+            source: SourceInfo::default(),
+            tracks: vec![Track {
+                id: "captions".into(),
+                kind: TrackKind::Caption,
+                clips: vec![Clip::Caption(CaptionClip {
+                    id: "c1".into(),
+                    text: "Hello & world".into(),
+                    start_ms: 0,
+                    duration_ms: 1000,
+                    speaker: "a".into(),
+                    speaker_display: None,
+                    extra: BTreeMap::new(),
+                })],
+            }],
+            extra: BTreeMap::new(),
+        }
     }
 
-    #[test] fn fcpxml_escapes_caption() { let (s, _) = render_fcpxml(&sample(), Path::new(".")); assert!(s.contains("Hello &amp; world")); }
-    #[test] fn otio_has_timeline_schema() { let s = render_otio(&sample(), Path::new(".")).unwrap(); assert!(s.contains("Timeline.1")); assert!(s.contains("Hello & world")); }
+    #[test]
+    fn fcpxml_escapes_caption() {
+        let (s, _) = render_fcpxml(&sample(), Path::new("."));
+        assert!(s.contains("Hello &amp; world"));
+    }
+    #[test]
+    fn otio_has_timeline_schema() {
+        let s = render_otio(&sample(), Path::new(".")).unwrap();
+        assert!(s.contains("Timeline.1"));
+        assert!(s.contains("Hello & world"));
+    }
 }
