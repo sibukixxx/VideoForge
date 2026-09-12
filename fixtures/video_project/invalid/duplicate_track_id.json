@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "bad",
+  "title": "Bad",
+  "video": {
+    "width": 1280,
+    "height": 720,
+    "fps": 30
+  },
+  "source": {},
+  "tracks": [
+    {
+      "id": "dup",
+      "kind": "audio",
+      "clips": [
+        {
+          "type": "audio",
+          "id": "audio-001",
+          "source": "assets/audio/a.wav",
+          "start_ms": 0,
+          "duration_ms": 1000,
+          "speaker": "reimu"
+        }
+      ]
+    },
+    {
+      "id": "dup",
+      "kind": "caption",
+      "clips": [
+        {
+          "type": "caption",
+          "id": "caption-001",
+          "text": "same track id as above",
+          "start_ms": 0,
+          "duration_ms": 1000,
+          "speaker": "reimu"
+        }
+      ]
+    }
+  ]
+}

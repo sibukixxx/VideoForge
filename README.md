@@ -3,6 +3,7 @@
 **Markdown 台本 → 音声・字幕・タイムラインを持つ OS 非依存の VideoProject → Windows では YMM4 編集プロジェクト、Windows/macOS ではプレビュー動画** を出力するローカル動画制作コンパイラ。
 
 設計書: [`docs/design/mvp-v0.2-cross-platform.md`](docs/design/mvp-v0.2-cross-platform.md)
+VideoProject IR v1 仕様: [`docs/video-project.md`](docs/video-project.md)
 
 ```text
 Claude Code / Codex / 人間
