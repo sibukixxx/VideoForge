@@ -36,10 +36,10 @@ use fs4::TryLockError;
 
 use tokio_util::sync::CancellationToken;
 use videoforge_platform::platform_label;
-use videoforge_project::{RelativeAssetPath, SourceInfo, VideoProject};
+use videoforge_project::{MouthCue, MouthState, RelativeAssetPath, SourceInfo, VideoProject};
 use videoforge_timeline::srt::{self, SrtOptions};
 use videoforge_timeline::{
-    CharacterPerformanceInput, DialogueInput, TimelineInput, TimelineOptions,
+    CharacterPerformanceInput, DialogueInput, TimelineInput, TimelineOptions, VisualEventKind,
 };
 
 use crate::config::Config;
@@ -335,15 +335,44 @@ async fn run_pipeline(
     let mut visual_events = Vec::new();
     let mut copied = std::collections::BTreeSet::new();
     for d in report.directives.iter().filter(|d| d.exists) {
-        if copied.insert(d.source.as_str().to_string()) {
-            let src = workspace.resolve(d.source.as_str())?;
-            let dst = d.source.resolve(tmp_dir);
+        let mut event = d.event.clone();
+        let mut assets = vec![d.source.clone()];
+        if let VisualEventKind::Character { mouth: Some(mouth), .. } = &mut event.kind {
+            assets.push(mouth.half_source.clone());
+            assets.push(mouth.open_source.clone());
+            if let Some(audio) = synthesized
+                .iter()
+                .find(|audio| audio.index == event.anchor_dialogue_index)
+            {
+                let track = crate::lipsync::analyze_amplitude(
+                    &audio.wav,
+                    crate::lipsync::DEFAULT_INTERVAL_MS,
+                )
+                .map_err(|reason| AppError::LipSyncGenerationFailed {
+                    index: audio.index,
+                    reason,
+                })?;
+                mouth.cues = quantize_mouth_cues(&track);
+                if mouth.cues.last().map(|cue| cue.state) != Some(MouthState::Closed) {
+                    mouth.cues.push(MouthCue {
+                        offset_ms: audio.duration_ms.min(u64::from(u32::MAX)) as u32,
+                        state: MouthState::Closed,
+                    });
+                }
+            }
+        }
+        for asset in assets {
+            if !copied.insert(asset.as_str().to_string()) {
+                continue;
+            }
+            let src = workspace.resolve(asset.as_str())?;
+            let dst = asset.resolve(tmp_dir);
             if let Some(parent) = dst.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| AppError::write(parent, e))?;
             }
             std::fs::copy(&src, &dst).map_err(|e| AppError::write(&dst, e))?;
         }
-        visual_events.push(d.event.clone());
+        visual_events.push(event);
     }
 
     // --- Timeline --------------------------------------------------------
@@ -500,6 +529,35 @@ fn nonce() -> String {
     format!("{}-{millis}", std::process::id())
 }
 
+/// Convert the continuous amplitude curve into three visual states and keep
+/// only transitions. The first cue is always at zero, so renderers have a
+/// deterministic state even for silence.
+fn quantize_mouth_cues(track: &crate::lipsync::LipSyncTrack) -> Vec<MouthCue> {
+    let mut cues = Vec::new();
+    for sample in &track.samples {
+        let state = if sample.mouth_open < 0.2 {
+            MouthState::Closed
+        } else if sample.mouth_open < 0.55 {
+            MouthState::Half
+        } else {
+            MouthState::Open
+        };
+        if cues.last().map(|cue: &MouthCue| cue.state) != Some(state) {
+            cues.push(MouthCue {
+                offset_ms: sample.t_ms,
+                state,
+            });
+        }
+    }
+    if cues.is_empty() {
+        cues.push(MouthCue {
+            offset_ms: 0,
+            state: MouthState::Closed,
+        });
+    }
+    cues
+}
+
 fn make_tmp_dir(workspace: &Workspace, slug: &str) -> Result<PathBuf, AppError> {
     let dir = workspace.tmp_dir().join(format!("{slug}-{}", nonce()));
     std::fs::create_dir_all(&dir).map_err(|e| AppError::write(&dir, e))?;
@@ -585,6 +643,43 @@ mod tests {
             Vec::<String>::new(),
             "the displaced output must be removed once the new one is in place"
         );
+    }
+
+    #[tokio::test]
+    async fn three_state_png_mouth_is_copied_and_recorded_in_the_ir() {
+        let dir = tempfile::tempdir().unwrap();
+        init::init(dir.path(), Some("t")).unwrap();
+        let character_dir = dir.path().join("assets/character/reimu");
+        std::fs::create_dir_all(&character_dir).unwrap();
+        for name in ["closed.png", "half.png", "open.png"] {
+            std::fs::write(character_dir.join(name), b"synthetic-png").unwrap();
+        }
+        let ws = Workspace::open(dir.path()).unwrap();
+        let script = ws.scripts_dir().join("mouth.md");
+        std::fs::write(
+            &script,
+            "@character reimu[src=assets/character/reimu/closed.png, mouth_half=assets/character/reimu/half.png, mouth_open=assets/character/reimu/open.png]\n霊夢:\nこんにちは。\n",
+        )
+        .unwrap();
+
+        let deps = GenerateDeps::new(Arc::new(FakeTtsEngine::default()));
+        let out = generate(&ws, &script, GenerateOptions::default(), deps)
+            .await
+            .unwrap();
+        let project = VideoProject::load(&out.project_path).unwrap();
+        let character = project.character_clips()[0];
+        let mouth = character.mouth.as_ref().expect("mouth animation in IR");
+        assert_eq!(
+            mouth.cues,
+            vec![MouthCue {
+                offset_ms: 0,
+                state: MouthState::Closed,
+            }]
+        );
+        for name in ["closed.png", "half.png", "open.png"] {
+            assert!(out.output_dir.join("assets/character/reimu").join(name).is_file());
+        }
+        assert_eq!(project.referenced_assets().len(), 4); // audio + three PNGs
     }
 
     #[tokio::test]
@@ -798,5 +893,59 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, AppError::InvalidScript(_)), "{err}");
         assert!(!ws.generated_dir().join("bad").exists());
+    }
+
+    #[test]
+    fn mouth_curve_is_quantized_and_run_length_encoded() {
+        let track = crate::lipsync::LipSyncTrack {
+            interval_ms: 50,
+            samples: vec![
+                crate::lipsync::LipSyncSample {
+                    t_ms: 0,
+                    mouth_open: 0.0,
+                },
+                crate::lipsync::LipSyncSample {
+                    t_ms: 50,
+                    mouth_open: 0.1,
+                },
+                crate::lipsync::LipSyncSample {
+                    t_ms: 100,
+                    mouth_open: 0.3,
+                },
+                crate::lipsync::LipSyncSample {
+                    t_ms: 150,
+                    mouth_open: 0.8,
+                },
+                crate::lipsync::LipSyncSample {
+                    t_ms: 200,
+                    mouth_open: 0.7,
+                },
+                crate::lipsync::LipSyncSample {
+                    t_ms: 250,
+                    mouth_open: 0.0,
+                },
+            ],
+        };
+        assert_eq!(
+            quantize_mouth_cues(&track),
+            vec![
+                MouthCue {
+                    offset_ms: 0,
+                    state: MouthState::Closed,
+                },
+                MouthCue {
+                    offset_ms: 100,
+                    state: MouthState::Half,
+                },
+                MouthCue {
+                    offset_ms: 150,
+                    state: MouthState::Open,
+                },
+                MouthCue {
+                    offset_ms: 250,
+                    state: MouthState::Closed,
+                },
+            ]
+        );
     }
 }
