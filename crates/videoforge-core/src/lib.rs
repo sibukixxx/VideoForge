@@ -25,6 +25,7 @@ pub mod manifest;
 pub mod preset;
 pub mod preview;
 pub mod progress;
+pub mod speaker_profile;
 pub mod tts;
 pub mod validate;
 pub mod wav;
