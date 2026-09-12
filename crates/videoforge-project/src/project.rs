@@ -455,12 +455,27 @@ pub struct BgmClip {
     pub source: RelativeAssetPath,
     pub start_ms: u64,
     pub duration_ms: u64,
-    /// Linear gain, `1.0` = as authored.
+    /// Linear gain, `1.0` = as authored — this is the *base* level; the
+    /// renderer additionally ducks it under any overlapping dialogue
+    /// (P1-4), so this is "as loud as it gets", not "as loud as it always
+    /// plays".
     #[serde(default = "default_volume")]
     pub volume: f32,
     /// Repeat the source until `duration_ms` is filled instead of going silent.
     #[serde(default)]
     pub looping: bool,
+    /// In-point within the source file (P1-4), same rule as `VideoClip::trim_start_ms`.
+    #[serde(default)]
+    pub trim_start_ms: u64,
+    /// Linear ramp up from silence at the clip's own start.
+    #[serde(default)]
+    pub fade_in_ms: u64,
+    /// Linear ramp down to silence at the clip's own end.
+    #[serde(default)]
+    pub fade_out_ms: u64,
+    /// Apply loudness normalization (FFmpeg `dynaudnorm`) to this clip alone.
+    #[serde(default)]
+    pub normalize: bool,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -809,6 +824,10 @@ mod tests {
                 duration_ms: 3410,
                 volume: 0.6,
                 looping: true,
+                trim_start_ms: 0,
+                fade_in_ms: 0,
+                fade_out_ms: 0,
+                normalize: false,
                 extra: BTreeMap::new(),
             })],
         });

@@ -35,6 +35,10 @@ pub const ZOOM_IN_FRACTION: f64 = 0.15;
 /// source; the window slides across the remaining `1.0 - PAN_CROP_FRACTION`
 /// of the source over the clip's own duration (P1-5).
 pub const PAN_CROP_FRACTION: f64 = 0.9;
+/// BGM volume multiplier applied under any overlapping dialogue (P1-4).
+/// Multiplies the clip's own `volume`, so at `volume: 1.0` this drops BGM
+/// to 35% while someone is speaking, then back to full between lines.
+pub const BGM_DUCK_VOLUME: f32 = 0.35;
 
 /// One character's overlay plan: where its sprites go, and when `half`/
 /// `open` should cover the always-present `closed` base layer. `closed` has
@@ -209,6 +213,32 @@ pub struct TextPlan {
     pub text_file: String,
 }
 
+/// One background music clip, ready for the audio engine (P1-4): volume,
+/// fade-in/out, loop, trim and normalization all land in `audio_filter`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BgmPlan {
+    /// Relative to the project dir.
+    pub path: String,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    pub volume: f32,
+    pub looping: bool,
+    pub trim_start_ms: u64,
+    pub fade_in_ms: u64,
+    pub fade_out_ms: u64,
+    pub normalize: bool,
+}
+
+/// One sound-effect clip (P1-4): a one-shot, volume only — trim/loop/fade
+/// don't apply to something meant to play once, in full, as authored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoundEffectPlan {
+    /// Relative to the project dir.
+    pub path: String,
+    pub start_ms: u64,
+    pub volume: f32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderPlan {
     pub width: u32,
@@ -218,11 +248,16 @@ pub struct RenderPlan {
     /// Relative background image path, if any.
     pub background: Option<String>,
     pub background_color: String,
-    /// Relative audio paths and their start offsets.
-    pub audio: Vec<(String, u64)>,
+    /// Relative dialogue audio paths, their start offset, and their
+    /// duration (the last is needed to compute BGM ducking windows).
+    pub audio: Vec<(String, u64, u64)>,
     pub captions: Vec<CaptionPlan>,
     /// On-screen text clips (P1-1), distinct from `captions`.
     pub texts: Vec<TextPlan>,
+    /// Background music clips (P1-4).
+    pub bgm: Vec<BgmPlan>,
+    /// Sound-effect clips (P1-4).
+    pub sound_effects: Vec<SoundEffectPlan>,
     pub font: Option<PathBuf>,
     pub output: PathBuf,
     /// Absolute scratch directory (caption text files are written here).
@@ -285,7 +320,7 @@ impl RenderPlan {
         let audio = project
             .audio_clips()
             .iter()
-            .map(|a| (a.source.as_str().to_string(), a.start_ms))
+            .map(|a| (a.source.as_str().to_string(), a.start_ms, a.duration_ms))
             .collect();
         let captions = project
             .caption_clips()
@@ -318,6 +353,30 @@ impl RenderPlan {
             })
             .collect();
         let visual_layers = build_visual_layers(project);
+        let bgm = project
+            .bgm_clips()
+            .iter()
+            .map(|b| BgmPlan {
+                path: b.source.as_str().to_string(),
+                start_ms: b.start_ms,
+                duration_ms: b.duration_ms,
+                volume: b.volume,
+                looping: b.looping,
+                trim_start_ms: b.trim_start_ms,
+                fade_in_ms: b.fade_in_ms,
+                fade_out_ms: b.fade_out_ms,
+                normalize: b.normalize,
+            })
+            .collect();
+        let sound_effects = project
+            .sound_effect_clips()
+            .iter()
+            .map(|s| SoundEffectPlan {
+                path: s.source.as_str().to_string(),
+                start_ms: s.start_ms,
+                volume: s.volume,
+            })
+            .collect();
         Self {
             width: project.video.width,
             height: project.video.height,
@@ -328,6 +387,8 @@ impl RenderPlan {
             audio,
             captions,
             texts,
+            bgm,
+            sound_effects,
             font,
             output,
             scratch_dir,
@@ -804,13 +865,105 @@ impl RenderPlan {
         parts.join(";")
     }
 
-    pub fn audio_filter(&self) -> String {
-        if self.audio.is_empty() {
-            return format!("anullsrc=r={AUDIO_SAMPLE_RATE}:cl=stereo[aout]");
+    /// First FFmpeg input index of the BGM clips — after the background,
+    /// dialogue audio, visual layers and character sprites (all of which
+    /// `:a` never needs to reference), so adding BGM/SE inputs here can
+    /// never shift any `:v` index computed elsewhere.
+    fn bgm_input_start(&self) -> usize {
+        1 + self.audio.len() + self.visual_layers.len() + self.character_overlays.len() * 3
+    }
+
+    fn se_input_start(&self) -> usize {
+        self.bgm_input_start() + self.bgm.len()
+    }
+
+    /// Every BGM/SE clip's FFmpeg input options, in the exact order
+    /// `audio_filter` assigns input indices to them — shared by
+    /// `build_args` so the two never drift apart. `stream_loop` is `-1`
+    /// only for a looping BGM clip (bounded back down to its own
+    /// `duration_ms` by `audio_filter`'s `atrim`, same reasoning as a
+    /// looping `Video` layer).
+    pub fn bgm_and_se_inputs(&self) -> Vec<(String, bool)> {
+        self.bgm
+            .iter()
+            .map(|b| (b.path.clone(), b.looping))
+            .chain(self.sound_effects.iter().map(|s| (s.path.clone(), false)))
+            .collect()
+    }
+
+    /// Dialogue windows `(start_ms, end_ms)`, used to duck BGM under
+    /// overlapping speech (P1-4).
+    fn dialogue_windows(&self) -> Vec<(u64, u64)> {
+        self.audio
+            .iter()
+            .map(|(_, start, duration)| (*start, start + duration))
+            .collect()
+    }
+
+    /// One BGM clip's filter chain: optional trim (bounding a looping
+    /// source back down to its own `duration_ms`, so `-stream_loop -1`
+    /// input still terminates), resample/format, `adelay` to its timeline
+    /// position, optional loudness normalization, its base `volume`,
+    /// optional fade in/out, and — the P1-4 headline feature — ducking
+    /// under any overlapping dialogue via a single time-varying `volume`
+    /// expression rather than one `volume` filter per dialogue line.
+    fn bgm_chain(&self, b: &BgmPlan) -> Vec<String> {
+        let mut chain = Vec::new();
+        if b.looping {
+            chain.push(format!(
+                "atrim=start={}:end={}",
+                fmt_secs(b.trim_start_ms as f64 / 1000.0),
+                fmt_secs((b.trim_start_ms + b.duration_ms) as f64 / 1000.0)
+            ));
+        } else if b.trim_start_ms > 0 {
+            chain.push(format!(
+                "atrim=start={}",
+                fmt_secs(b.trim_start_ms as f64 / 1000.0)
+            ));
         }
+        chain.push(format!("aresample={AUDIO_SAMPLE_RATE}"));
+        chain.push("aformat=channel_layouts=stereo".to_string());
+        chain.push(format!("adelay={}:all=1", b.start_ms));
+        if b.normalize {
+            chain.push("dynaudnorm".to_string());
+        }
+        chain.push(format!("volume={:.4}", b.volume.max(0.0)));
+        if b.fade_in_ms > 0 {
+            chain.push(format!(
+                "afade=t=in:st={}:d={}",
+                fmt_secs(b.start_ms as f64 / 1000.0),
+                fmt_secs(b.fade_in_ms as f64 / 1000.0)
+            ));
+        }
+        if b.fade_out_ms > 0 {
+            let end_sec = (b.start_ms + b.duration_ms) as f64 / 1000.0;
+            let fade_sec = b.fade_out_ms as f64 / 1000.0;
+            chain.push(format!(
+                "afade=t=out:st={}:d={}",
+                fmt_secs((end_sec - fade_sec).max(b.start_ms as f64 / 1000.0)),
+                fmt_secs(fade_sec)
+            ));
+        }
+        let dialogue_windows = self.dialogue_windows();
+        if !dialogue_windows.is_empty() {
+            let duck_expr = dialogue_windows
+                .iter()
+                .map(|(s, e)| format!("between(t,{},{})", ms_to_secs(*s), ms_to_secs(*e)))
+                .collect::<Vec<_>>()
+                .join("+");
+            chain.push(format!(
+                "volume=eval=frame:volume='if({duck_expr}\\,{:.4}\\,1)'",
+                BGM_DUCK_VOLUME
+            ));
+        }
+        chain
+    }
+
+    pub fn audio_filter(&self) -> String {
         let mut parts = Vec::new();
         let mut labels = Vec::new();
-        for (i, (_, start)) in self.audio.iter().enumerate() {
+
+        for (i, (_, start, _)) in self.audio.iter().enumerate() {
             let label = format!("[a{}]", i + 1);
             parts.push(format!(
                 "[{}:a]aresample={AUDIO_SAMPLE_RATE},aformat=channel_layouts=stereo,adelay={start}:all=1{label}",
@@ -818,7 +971,31 @@ impl RenderPlan {
             ));
             labels.push(label);
         }
-        if self.audio.len() == 1 {
+
+        let bgm_start = self.bgm_input_start();
+        for (i, b) in self.bgm.iter().enumerate() {
+            let input_index = bgm_start + i;
+            let label = format!("[bgm{i}]");
+            let chain = self.bgm_chain(b);
+            parts.push(format!("[{input_index}:a]{}{label}", chain.join(",")));
+            labels.push(label);
+        }
+
+        let se_start = self.se_input_start();
+        for (i, s) in self.sound_effects.iter().enumerate() {
+            let input_index = se_start + i;
+            let label = format!("[se{i}]");
+            parts.push(format!(
+                "[{input_index}:a]aresample={AUDIO_SAMPLE_RATE},aformat=channel_layouts=stereo,adelay={}:all=1,volume={:.4}{label}",
+                s.start_ms,
+                s.volume.max(0.0)
+            ));
+            labels.push(label);
+        }
+
+        if labels.is_empty() {
+            parts.push(format!("anullsrc=r={AUDIO_SAMPLE_RATE}:cl=stereo[aout]"));
+        } else if labels.len() == 1 {
             parts.push(format!("{}anull[aout]", labels[0]));
         } else {
             parts.push(format!(
@@ -857,7 +1034,7 @@ pub fn build_args(plan: &RenderPlan) -> Vec<OsString> {
         }
     }
     // inputs 1..N: audio
-    for (path, _) in &plan.audio {
+    for (path, _, _) in &plan.audio {
         args.push("-i".into());
         args.push(path.into());
     }
@@ -899,6 +1076,18 @@ pub fn build_args(plan: &RenderPlan) -> Vec<OsString> {
             ]
             .map(OsString::from),
         );
+    }
+    // final inputs: BGM/SE (P1-4), audio-only — order must match
+    // `RenderPlan::bgm_input_start`/`se_input_start`'s index math. A looping
+    // BGM clip uses `-stream_loop -1`, bounded back down to its own
+    // `duration_ms` by `audio_filter`'s `atrim` (same reasoning as a
+    // looping `Video` layer).
+    for (path, looping) in plan.bgm_and_se_inputs() {
+        if looping {
+            args.extend(["-stream_loop", "-1", "-i", &path].map(OsString::from));
+        } else {
+            args.extend(["-i", &path].map(OsString::from));
+        }
     }
 
     let filter = format!("{};{}", plan.video_filter(), plan.audio_filter());
@@ -1036,8 +1225,9 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use videoforge_core::project::{
-        AudioClip, BackgroundClip, CaptionClip, CharacterClip, Clip, CropRect, FitMode, ImageClip,
-        Presentation, RelativeAssetPath, TextClip, Track, TrackKind, VideoClip, VideoSettings,
+        AudioClip, BackgroundClip, BgmClip, CaptionClip, CharacterClip, Clip, CropRect, FitMode,
+        ImageClip, Presentation, RelativeAssetPath, SoundEffectClip, TextClip, Track, TrackKind,
+        VideoClip, VideoSettings,
     };
 
     fn project(with_background: bool) -> VideoProject {
@@ -1890,5 +2080,157 @@ mod tests {
             std::fs::read_to_string(plan.scratch_dir.join("text-001.txt")).unwrap(),
             "Hello Title"
         );
+    }
+
+    // -------------------------------------------------------------- audio engine (P1-4)
+
+    fn bgm_clip(start_ms: u64, duration_ms: u64, volume: f32, looping: bool) -> BgmClip {
+        BgmClip {
+            id: "bgm-001".into(),
+            source: RelativeAssetPath::new("assets/bgm/main.mp3").unwrap(),
+            start_ms,
+            duration_ms,
+            volume,
+            looping,
+            trim_start_ms: 0,
+            fade_in_ms: 0,
+            fade_out_ms: 0,
+            normalize: false,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    fn project_with_bgm(bgm: BgmClip) -> VideoProject {
+        let mut p = project(false);
+        p.tracks.push(Track {
+            id: "bgm".into(),
+            kind: TrackKind::Bgm,
+            clips: vec![Clip::Bgm(bgm)],
+        });
+        p
+    }
+
+    fn plan_for(p: &VideoProject) -> RenderPlan {
+        RenderPlan::build(
+            p,
+            "#000000",
+            None,
+            "o.mp4".into(),
+            "/p/.t".into(),
+            ".t".into(),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn audio_filter_with_no_audio_at_all_uses_anullsrc() {
+        let p = VideoProject::new("s", "S", VideoSettings::default());
+        let plan = plan_for(&p);
+        assert_eq!(
+            plan.audio_filter(),
+            format!("anullsrc=r={AUDIO_SAMPLE_RATE}:cl=stereo[aout]")
+        );
+    }
+
+    #[test]
+    fn audio_filter_mixes_dialogue_bgm_and_se() {
+        let mut p = project_with_bgm(bgm_clip(0, 7290, 0.6, true));
+        p.tracks.push(Track {
+            id: "se".into(),
+            kind: TrackKind::SoundEffect,
+            clips: vec![Clip::SoundEffect(SoundEffectClip {
+                id: "se-001".into(),
+                source: RelativeAssetPath::new("assets/se/pop.wav").unwrap(),
+                start_ms: 1200,
+                duration_ms: 800,
+                volume: 1.0,
+                extra: BTreeMap::new(),
+            })],
+        });
+        let plan = plan_for(&p);
+        let fc = plan.audio_filter();
+        // 2 dialogue inputs (1,2) + 1 bgm + 1 se = 4 mixed labels
+        assert!(
+            fc.contains("amix=inputs=4:duration=longest:normalize=0[aout]"),
+            "{fc}"
+        );
+        assert!(fc.contains("[bgm0]"), "{fc}");
+        assert!(fc.contains("[se0]"), "{fc}");
+    }
+
+    #[test]
+    fn audio_filter_ducks_bgm_under_dialogue_windows() {
+        let plan = plan_for(&project_with_bgm(bgm_clip(0, 7290, 1.0, false)));
+        let fc = plan.audio_filter();
+        // project(false) dialogue: (0,3410) and (3610,7290) -> end = start+duration
+        assert!(
+            fc.contains(&format!(
+                "volume=eval=frame:volume='if(between(t,0,3.41)+between(t,3.61,7.29)\\,{:.4}\\,1)'",
+                BGM_DUCK_VOLUME
+            )),
+            "{fc}"
+        );
+    }
+
+    #[test]
+    fn audio_filter_bgm_fade_in_and_out() {
+        let mut bgm = bgm_clip(1000, 4000, 1.0, false);
+        bgm.fade_in_ms = 500;
+        bgm.fade_out_ms = 1000;
+        let plan = plan_for(&project_with_bgm(bgm));
+        let fc = plan.audio_filter();
+        assert!(fc.contains("afade=t=in:st=1:d=0.5"), "{fc}");
+        assert!(fc.contains("afade=t=out:st=4:d=1"), "{fc}");
+    }
+
+    #[test]
+    fn audio_filter_bgm_normalize_applies_dynaudnorm() {
+        let mut bgm = bgm_clip(0, 1000, 1.0, false);
+        bgm.normalize = true;
+        let plan = plan_for(&project_with_bgm(bgm));
+        assert!(plan.audio_filter().contains("dynaudnorm"));
+    }
+
+    #[test]
+    fn audio_filter_looping_bgm_is_trimmed_to_its_own_duration() {
+        let plan = plan_for(&project_with_bgm(bgm_clip(2000, 5000, 1.0, true)));
+        let fc = plan.audio_filter();
+        assert!(fc.contains("atrim=start=0:end=5"), "{fc}");
+    }
+
+    #[test]
+    fn audio_filter_no_dialogue_means_no_ducking() {
+        let p = VideoProject::new("s", "S", VideoSettings::default());
+        let plan = plan_for(&project_with_bgm(bgm_clip(0, 1000, 1.0, false)));
+        // sanity: this project (built from project_with_bgm) DOES have
+        // dialogue; use a bgm-only project instead to check the no-dialogue path.
+        let mut bgm_only = p;
+        bgm_only.tracks.push(Track {
+            id: "bgm".into(),
+            kind: TrackKind::Bgm,
+            clips: vec![Clip::Bgm(bgm_clip(0, 1000, 1.0, false))],
+        });
+        let plan_no_dialogue = plan_for(&bgm_only);
+        assert!(!plan_no_dialogue.audio_filter().contains("if("));
+        // the dialogue-bearing plan, by contrast, does duck.
+        assert!(plan.audio_filter().contains("if("));
+    }
+
+    #[test]
+    fn build_args_appends_bgm_and_se_inputs_after_character_sprites() {
+        let plan = plan_for(&project_with_bgm(bgm_clip(0, 1000, 1.0, true)));
+        let args: Vec<String> = build_args(&plan)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let bgm_i = args
+            .iter()
+            .position(|a| a == "assets/bgm/main.mp3")
+            .unwrap();
+        assert_eq!(args[bgm_i - 3], "-stream_loop");
+        let fc = &args[args.iter().position(|x| x == "-filter_complex").unwrap() + 1];
+        // project(false) has 2 dialogue inputs -> bgm starts at input 3
+        // (0=bg,1,2=dialogue)
+        assert!(fc.contains("[3:a]"), "{fc}");
     }
 }

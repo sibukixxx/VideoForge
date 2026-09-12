@@ -31,6 +31,7 @@ MVP v0.1 の **Core + CLI**（設計書 Phase 1〜6）と Tauri GUI MVP（Phase 
 | VOICEVOX（audio_query → override → synthesis）、OS キャッシュ（engine version 込みの key）、concurrency、cancel | ✅ 実 VOICEVOX の統合テストは engine が居る時だけ実行（`docs/testing/voicevox-manual-e2e.md`、macOS 確認済） |
 | Timeline / SRT（directive → clip 配置を含む） | ✅ |
 | FFmpeg preview（背景 + 音声配置 + 字幕 + speaker 名 + fade + Image/Character立ち絵/Video合成 + crop/fit/rotation/opacity + fade/pan/zoom transition + on-screen Text）(P1-1/P1-2/P1-5) | ✅ command builder + filtergraph escaping はテスト済。実 FFmpeg の統合テストは ffmpeg が見つかった時だけ実行（`docs/testing/ffmpeg-path-escaping.md`）。pan/zoom は実FFmpegでの検証は未実施 |
+| Audio Engine（Dialogue / BGM / SE を `amix` で合成、BGM の volume/loop/trim/fade-in-out/normalize、**Dialogue 発話区間での BGM ducking**）(P1-4) | ✅ command builder テスト済。Video clip 自身の音声トラックは未合成（次の課題） |
 | YMM4 exporter（Template Patch 方式、Windows path materialize、Windows 限定） | ✅ 合成 fixture でテスト済。**実 YMM4 template での Phase 0 検証は未実施** |
 | Handoff bundle（dir + zip） | ✅ |
 | Tauri GUI（`apps/desktop`: Workspace / Script / Validate / Generate + 進捗 / Preview / Doctor / YMM4 export or bundle） | ✅ MVP。実機での起動確認は `apps/desktop/README.md` のチェックリスト |
@@ -97,7 +98,7 @@ template: yukkuri-tech
 directive は直後の台詞と一緒に始まり、素材は Workspace 相対パスで `assets/` 配下に置く。
 
 ```markdown
-@bgm assets/bgm/main.mp3[volume=0.6, loop=true]
+@bgm assets/bgm/main.mp3[volume=0.6, loop=true, fade_in_ms=500, fade_out_ms=800, trim_start_ms=0, normalize=true]
 
 @image assets/image/chart.png[role=diagram, duration_ms=3000]
 @character reimu[expression=happy]

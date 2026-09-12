@@ -103,6 +103,14 @@ pub enum VisualEventKind {
         source: RelativeAssetPath,
         volume: f32,
         looping: bool,
+        #[serde(default)]
+        trim_start_ms: u64,
+        #[serde(default)]
+        fade_in_ms: u64,
+        #[serde(default)]
+        fade_out_ms: u64,
+        #[serde(default)]
+        normalize: bool,
     },
     SoundEffect {
         source: RelativeAssetPath,
@@ -385,6 +393,10 @@ pub fn place_visual_events(
                 source,
                 volume,
                 looping,
+                trim_start_ms,
+                fade_in_ms,
+                fade_out_ms,
+                normalize,
             } => bgm.push(Clip::Bgm(BgmClip {
                 id: format!("bgm-{:03}", bgm.len() + 1),
                 source,
@@ -392,6 +404,10 @@ pub fn place_visual_events(
                 duration_ms,
                 volume,
                 looping,
+                trim_start_ms,
+                fade_in_ms,
+                fade_out_ms,
+                normalize,
                 extra,
             })),
             VisualEventKind::SoundEffect { source, volume } => {
@@ -693,6 +709,10 @@ mod tests {
                     source: asset("assets/bgm/main.mp3"),
                     volume: 0.6,
                     looping: true,
+                    trim_start_ms: 0,
+                    fade_in_ms: 0,
+                    fade_out_ms: 0,
+                    normalize: false,
                 },
             },
             VisualEvent {

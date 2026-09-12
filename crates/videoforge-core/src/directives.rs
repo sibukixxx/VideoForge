@@ -114,8 +114,22 @@ pub fn resolve_directives(
             _ => false,
         };
         let trim_start_ms = match &d.kind {
-            DirectiveKind::Video { .. } => attrs.u64("trim_start_ms").unwrap_or(0),
+            DirectiveKind::Video { .. } | DirectiveKind::Bgm { .. } => {
+                attrs.u64("trim_start_ms").unwrap_or(0)
+            }
             _ => 0,
+        };
+        let fade_in_ms = match &d.kind {
+            DirectiveKind::Bgm { .. } => attrs.u64("fade_in_ms").unwrap_or(0),
+            _ => 0,
+        };
+        let fade_out_ms = match &d.kind {
+            DirectiveKind::Bgm { .. } => attrs.u64("fade_out_ms").unwrap_or(0),
+            _ => 0,
+        };
+        let normalize = match &d.kind {
+            DirectiveKind::Bgm { .. } => attrs.bool("normalize").unwrap_or(false),
+            _ => false,
         };
         attrs.finish();
 
@@ -166,6 +180,10 @@ pub fn resolve_directives(
                 source: source.clone(),
                 volume,
                 looping,
+                trim_start_ms,
+                fade_in_ms,
+                fade_out_ms,
+                normalize,
             },
             DirectiveKind::Se { .. } => VisualEventKind::SoundEffect {
                 source: source.clone(),
@@ -466,6 +484,37 @@ mod tests {
                 },
             }]
         );
+    }
+
+    #[test]
+    fn bgm_with_audio_engine_attributes_becomes_an_anchored_event() {
+        let (_d, ws, cfg) = workspace();
+        touch(&ws, "assets/bgm/main.mp3");
+        let r = resolve(
+            &ws,
+            &cfg,
+            "@bgm assets/bgm/main.mp3[volume=0.5, loop=true, trim_start_ms=1000, fade_in_ms=500, fade_out_ms=800, normalize=true]\n霊夢:\nやあ\n",
+        );
+        assert_eq!(r.errors, vec![]);
+        assert_eq!(r.warnings, vec![]);
+        let VisualEventKind::Bgm {
+            volume,
+            looping,
+            trim_start_ms,
+            fade_in_ms,
+            fade_out_ms,
+            normalize,
+            ..
+        } = &r.directives[0].event.kind
+        else {
+            panic!("bgm expected");
+        };
+        assert_eq!(*volume, 0.5);
+        assert!(*looping);
+        assert_eq!(*trim_start_ms, 1000);
+        assert_eq!(*fade_in_ms, 500);
+        assert_eq!(*fade_out_ms, 800);
+        assert!(*normalize);
     }
 
     #[test]

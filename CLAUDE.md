@@ -125,6 +125,25 @@ Pan/zoom (`crop=...:eval=frame` referencing `t`, not the `zoompan` filter — se
 own `"fade"` only ramps its own alpha at its own boundaries, not a coordinated dissolve with its
 neighbor) — "don't build a complex editor" per the P1-5 brief.
 
+### Audio engine (P1-4)
+
+`RenderPlan::audio_filter` mixes three independent groups of FFmpeg audio inputs — dialogue (as
+before), BGM (`BgmPlan`), and sound effects (`SoundEffectPlan`) — with `amix=inputs=N:duration=
+longest:normalize=0` rather than per-pair `amerge`, so adding a group never restructures the graph.
+BGM/SE inputs are appended at the *end* of the FFmpeg input list, after character sprites, via
+`RenderPlan::bgm_and_se_inputs`/`bgm_input_start`/`se_input_start` — deliberately, so the existing
+`:v`-stream index formulas for visual layers and character overlays (already covered by tests) never
+have to be recomputed when BGM/SE are added or removed. Each BGM clip's chain is, in order: an
+`atrim` bounding a looping (`-stream_loop -1`) source back down to its own `duration_ms` (so the
+otherwise-infinite input still terminates), resample/format, `adelay` to its timeline position,
+optional `dynaudnorm` (the `normalize` flag), its base `volume`, optional `afade` in/out, and —
+the headline feature — **ducking**: a single `volume=eval=frame:volume='if(<union-of-between(t,...)
+-windows>,DUCK,1)'` expression that reuses the exact enable-window-union pattern P0-1 established for
+character mouth overlays, applied here to an audio `volume` filter instead of a video `overlay`'s
+`enable=`. `BGM_DUCK_VOLUME` (0.35) is the one constant governing how far BGM drops under dialogue;
+there is no per-clip override yet. A video clip's own embedded audio track is not part of this mix
+(see "Known gaps").
+
 ### Incremental build (P0-4, minimal)
 
 TTS already skips synthesis per-dialogue via `TtsCache` (keyed on engine version + voice params +
@@ -202,11 +221,14 @@ These span files and are easy to break silently:
   intent's `fade=...:alpha=1` and a `Video` layer's `trim`+`setpts` offsetting follow well-known
   FFmpeg recipes, but the `"slide"`/`"zoom"` Ken Burns crop expressions (`eval=frame` referencing
   `t`, `clip(...)`) have not been run against a real FFmpeg from this repo — do that before relying
-  on them. `Video::volume`/`muted` are parsed and stored but not yet mixed into the audio graph
-  (P1-4 is where BGM/SE mixing lands; a video clip's own audio track is the same follow-up). A
-  `Video` clip and a mismatched `png_lipsync` character overlay could both legally claim the same
-  screen position — nothing detects that; it is on the author, same as any other clip authored by
-  hand.
+  on them. `Video::volume`/`muted` are parsed and stored but the video's own embedded audio track is
+  still not extracted or mixed into the audio graph — P1-4 landed BGM/SE mixing and dialogue ducking
+  (see "Audio engine" above), but a `Video` clip is silent regardless of its own soundtrack; this is
+  the next follow-up. A `Video` clip and a mismatched `png_lipsync` character overlay could both
+  legally claim the same screen position — nothing detects that; it is on the author, same as any
+  other clip authored by hand. BGM ducking's `BGM_DUCK_VOLUME` is a single global constant, not a
+  per-clip or per-config value, and has not been checked against a real FFmpeg render (command-
+  builder-tested only, same caveat as the rest of this list).
 - The CI workflow is parked in `docs/ci/` because the authoring session could not create files
   under `.github/workflows/`. Enabling it is a `git mv` (see `docs/ci/README.md`).
 - The Tauri GUI (`apps/desktop`) builds and its command layer is unit-tested, but it has not been
