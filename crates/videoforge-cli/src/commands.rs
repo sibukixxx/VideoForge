@@ -353,14 +353,55 @@ pub struct GenerateArgs {
     pub srt_speaker: bool,
     pub no_cache: bool,
     pub keep_tmp: bool,
+    /// Render preset name (P1-6), e.g. `youtube-1080p`.
+    pub preset: Option<String>,
+    /// Fast preview range as `START:END` in milliseconds (P1-7), e.g. `0:15000`.
+    pub range_ms: Option<String>,
     pub fake_tts: bool,
     pub endpoint: Option<String>,
+}
+
+/// Parse a `--range-ms START:END` value into a `(start_ms, end_ms)` pair,
+/// rejecting a non-numeric, reversed, or empty range up front rather than
+/// letting FFmpeg fail on a nonsensical `-t`.
+pub fn parse_range_ms(raw: &str) -> anyhow::Result<(u64, u64)> {
+    let (start, end) = raw
+        .split_once(':')
+        .ok_or_else(|| anyhow!("--range-ms must look like START:END (got `{raw}`)"))?;
+    let start: u64 = start
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("--range-ms start `{start}` is not a whole number of milliseconds"))?;
+    let end: u64 = end
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("--range-ms end `{end}` is not a whole number of milliseconds"))?;
+    if end <= start {
+        return Err(anyhow!(
+            "--range-ms end ({end}) must be greater than start ({start})"
+        ));
+    }
+    Ok((start, end))
 }
 
 pub async fn generate(ctx: &Context, args: GenerateArgs) -> anyhow::Result<ExitCode> {
     let ws = ctx.workspace_for(Some(&args.script))?;
     let cfg = ws.load_config()?;
     let script = resolve_script(&ws, &args.script)?;
+
+    let render_preset = args
+        .preset
+        .as_deref()
+        .map(|name| {
+            videoforge_core::preset::find(name).ok_or_else(|| {
+                anyhow!(
+                    "unknown --preset `{name}` (known presets: {})",
+                    videoforge_core::preset::names().join(", ")
+                )
+            })
+        })
+        .transpose()?;
+    let preview_range_ms = args.range_ms.as_deref().map(parse_range_ms).transpose()?;
 
     let endpoint = args.endpoint.unwrap_or(cfg.tts.endpoint.clone());
     let tts = make_tts(
@@ -435,6 +476,8 @@ pub async fn generate(ctx: &Context, args: GenerateArgs) -> anyhow::Result<ExitC
         srt_include_speaker: args.srt_speaker,
         cancel,
         keep_tmp_on_failure: args.keep_tmp,
+        render_preset,
+        preview_range_ms,
     };
     let out = core_generate::generate(&ws, &script, options, deps).await?;
 
@@ -478,6 +521,75 @@ pub async fn generate(ctx: &Context, args: GenerateArgs) -> anyhow::Result<ExitC
                 ws.relative(&out.project_path)
             );
         }
+    }
+    exit(0)
+}
+
+// ---------------------------------------------------------------- preview fast
+
+/// Fast preview (P1-7): re-render from an *already generated*
+/// `project.vfp.json`, skipping parse/validate/TTS/timeline entirely — see
+/// `videoforge_core::fastpreview`. `project_path` may be the project file
+/// itself or the `generated/<slug>/` directory containing it.
+pub async fn preview_fast(
+    ctx: &Context,
+    project_path: PathBuf,
+    range_ms: Option<String>,
+    preset: Option<String>,
+    out: Option<PathBuf>,
+) -> anyhow::Result<ExitCode> {
+    let project_path = if project_path.is_dir() {
+        project_path.join(core_generate::PROJECT_FILE)
+    } else {
+        project_path
+    };
+    let project_path = project_path
+        .canonicalize()
+        .with_context(|| format!("project not found: {}", project_path.display()))?;
+    let project_dir = project_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+    let project = VideoProject::load(&project_path)?;
+    let workspace = ctx.workspace_for(Some(&project_path))?;
+    let config = workspace.load_config()?;
+
+    let range_ms = range_ms.as_deref().map(parse_range_ms).transpose()?;
+    let render_preset = preset
+        .as_deref()
+        .map(|name| {
+            videoforge_core::preset::find(name).ok_or_else(|| {
+                anyhow!(
+                    "unknown --preset `{name}` (known presets: {})",
+                    videoforge_core::preset::names().join(", ")
+                )
+            })
+        })
+        .transpose()?;
+
+    let renderer = FfmpegPreviewRenderer::detect();
+    renderer.availability().map_err(anyhow::Error::from)?;
+    let output = out.unwrap_or_else(|| project_dir.join(core_generate::PREVIEW_FAST_FILE));
+
+    videoforge_core::fastpreview::render(videoforge_core::fastpreview::FastPreviewRequest {
+        project: &project,
+        project_dir: &project_dir,
+        config: &config,
+        workspace: &workspace,
+        renderer: &renderer,
+        output: &output,
+        range_ms,
+        preset: render_preset,
+    })
+    .await?;
+
+    if ctx.json {
+        ctx.emit_json(&serde_json::json!({
+            "ok": true,
+            "output": output,
+        }))?;
+    } else {
+        println!("Rendered {}", output.display());
     }
     exit(0)
 }
@@ -952,4 +1064,32 @@ pub fn assets(ctx: &Context, project: PathBuf) -> anyhow::Result<ExitCode> {
         }
     }
     exit(if ok { 0 } else { 2 })
+}
+
+#[cfg(test)]
+mod range_ms_tests {
+    use super::parse_range_ms;
+
+    #[test]
+    fn parses_a_valid_range() {
+        assert_eq!(parse_range_ms("0:5000").unwrap(), (0, 5000));
+        assert_eq!(parse_range_ms(" 100 : 200 ").unwrap(), (100, 200));
+    }
+
+    #[test]
+    fn rejects_a_missing_colon() {
+        assert!(parse_range_ms("5000").is_err());
+    }
+
+    #[test]
+    fn rejects_non_numeric_bounds() {
+        assert!(parse_range_ms("start:end").is_err());
+        assert!(parse_range_ms("0:end").is_err());
+    }
+
+    #[test]
+    fn rejects_end_not_after_start() {
+        assert!(parse_range_ms("5000:5000").is_err());
+        assert!(parse_range_ms("5000:1000").is_err());
+    }
 }

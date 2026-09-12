@@ -59,6 +59,10 @@ pub const PROJECT_FILE: &str = "project.vfp.json";
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const CAPTIONS_FILE: &str = "captions.srt";
 pub const PREVIEW_FILE: &str = "preview.mp4";
+/// Output filename for a range-limited fast preview (P1-7) — distinct from
+/// [`PREVIEW_FILE`] so it is never promoted in place of the canonical
+/// preview, and a stale one left over from an old generate is harmless.
+pub const PREVIEW_FAST_FILE: &str = "preview.fast.mp4";
 pub const SOURCE_FILE: &str = "source.md";
 pub const ASSET_REGISTRY_FILE: &str = "asset-registry.json";
 
@@ -70,6 +74,19 @@ pub struct GenerateOptions {
     pub cancel: CancellationToken,
     /// Keep the temp directory when generation fails (debugging).
     pub keep_tmp_on_failure: bool,
+    /// Render preset (P1-6): overrides `project.video`'s width/height/fps
+    /// and the preview renderer's codec/quality/audio-bitrate settings.
+    /// `None` keeps today's behavior (config-driven resolution, the
+    /// renderer's default encode settings).
+    pub render_preset: Option<&'static crate::preset::RenderPreset>,
+    /// Fast preview (P1-7): render only `[start_ms, end_ms)` of the
+    /// timeline via an output-side trim, and write it to
+    /// [`PREVIEW_FAST_FILE`] instead of [`PREVIEW_FILE`] so it can never
+    /// replace the canonical preview — a ranged render also bypasses the
+    /// P0-4 incremental-build cache entirely (it is a one-off exploratory
+    /// render, not "the" preview this project caches). `None` renders the
+    /// whole timeline to `PREVIEW_FILE` as before.
+    pub preview_range_ms: Option<(u64, u64)>,
 }
 
 impl Default for GenerateOptions {
@@ -79,6 +96,8 @@ impl Default for GenerateOptions {
             srt_include_speaker: false,
             cancel: CancellationToken::new(),
             keep_tmp_on_failure: false,
+            render_preset: None,
+            preview_range_ms: None,
         }
     }
 }
@@ -167,7 +186,10 @@ pub async fn generate(
             Ok(GeneratedProject {
                 slug,
                 project_path: output_dir.join(PROJECT_FILE),
-                preview_path: preview_path.map(|_| output_dir.join(PREVIEW_FILE)),
+                preview_path: preview_path
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .map(|f| output_dir.join(f)),
                 output_dir,
                 project,
                 manifest,
@@ -377,7 +399,7 @@ async fn run_pipeline(
     }
     progress.on_stage(&GenerationStage::BuildingTimeline);
     let source_rel = workspace.relative(script_path);
-    let project = videoforge_timeline::build(TimelineInput {
+    let mut project = videoforge_timeline::build(TimelineInput {
         id: report.slug.clone(),
         title: report.title.clone(),
         video: config.video.into(),
@@ -394,6 +416,17 @@ async fn run_pipeline(
             dialogue_gap_ms: config.timeline.dialogue_gap_ms,
         },
     })?;
+    // Render preset (P1-6): safe to override post-hoc because every clip's
+    // `Transform` position is a normalized `0.0..=1.0` fraction, never a
+    // pixel value, so changing width/height/fps here never touches
+    // placement math — `project.vfp.json` then correctly records the
+    // resolution this generate actually rendered at.
+    if let Some(preset) = options.render_preset {
+        project.video.width = preset.width;
+        project.video.height = preset.height;
+        project.video.fps = preset.fps;
+    }
+    let encode = options.render_preset.map(|p| p.encode).unwrap_or_default();
 
     // --- Project IR + captions + source copy -----------------------------
     progress.on_stage(&GenerationStage::WritingProject);
@@ -422,7 +455,17 @@ async fn run_pipeline(
         match &deps.preview {
             Some(renderer) => match renderer.availability() {
                 Ok(_) => {
-                    let output = tmp_dir.join(PREVIEW_FILE);
+                    // A range-limited fast preview (P1-7) is a disposable,
+                    // exploratory render: it writes to its own filename and
+                    // never participates in the P0-4 incremental-build
+                    // cache, so it can never mask or be masked by a
+                    // full-timeline `preview.mp4`.
+                    let is_fast = options.preview_range_ms.is_some();
+                    let output = tmp_dir.join(if is_fast {
+                        PREVIEW_FAST_FILE
+                    } else {
+                        PREVIEW_FILE
+                    });
                     let font = config
                         .preview
                         .font
@@ -435,6 +478,7 @@ async fn run_pipeline(
                         font.as_deref(),
                         &config.preview.background_color,
                         &config.preview.subtitle,
+                        &encode,
                         renderer.id(),
                     );
                     // P0-4: reuse the previous generate's preview.mp4 when
@@ -444,7 +488,8 @@ async fn run_pipeline(
                     let previous_preview = previous_dir.join(PREVIEW_FILE);
                     let previous_fingerprint_path =
                         previous_dir.join(crate::buildcache::PREVIEW_FINGERPRINT_FILE);
-                    let cache_hit = previous_preview.is_file()
+                    let cache_hit = !is_fast
+                        && previous_preview.is_file()
                         && std::fs::read_to_string(&previous_fingerprint_path)
                             .map(|s| s == fingerprint)
                             .unwrap_or(false);
@@ -462,15 +507,19 @@ async fn run_pipeline(
                                 font: font.as_deref(),
                                 background_color: &config.preview.background_color,
                                 subtitle: &config.preview.subtitle,
+                                encode: &encode,
+                                range_ms: options.preview_range_ms,
                                 character_sprites: &character_sprites,
                                 cancel: cancel.clone(),
                             })
                             .await?;
                     }
-                    let fingerprint_path =
-                        tmp_dir.join(crate::buildcache::PREVIEW_FINGERPRINT_FILE);
-                    std::fs::write(&fingerprint_path, &fingerprint)
-                        .map_err(|e| AppError::write(&fingerprint_path, e))?;
+                    if !is_fast {
+                        let fingerprint_path =
+                            tmp_dir.join(crate::buildcache::PREVIEW_FINGERPRINT_FILE);
+                        std::fs::write(&fingerprint_path, &fingerprint)
+                            .map_err(|e| AppError::write(&fingerprint_path, e))?;
+                    }
                     preview_path = Some(output);
                 }
                 Err(e) => {
@@ -497,7 +546,10 @@ async fn run_pipeline(
         generator_version: GENERATOR_VERSION.to_string(),
         source: source_rel,
         project: PROJECT_FILE.to_string(),
-        preview: preview_path.as_ref().map(|_| PREVIEW_FILE.to_string()),
+        preview: preview_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|f| f.to_string_lossy().into_owned()),
         captions: CAPTIONS_FILE.to_string(),
         audio: audio_files,
         generated_at: chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),

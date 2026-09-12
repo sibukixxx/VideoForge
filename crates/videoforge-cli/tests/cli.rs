@@ -607,3 +607,125 @@ fn generate_with_two_png_lipsync_characters_places_each_at_its_own_position() {
     let (code, _, _) = run(&ws, &["assets", out_dir.to_str().unwrap()]);
     assert_eq!(code, 0, "assets command accepts a directory too");
 }
+
+// ---------------------------------------------------------------- P1-6/P1-7: render presets / fast preview
+
+fn setup_generated_project(ws: &Path) -> PathBuf {
+    std::fs::copy(
+        repo_root().join("fixtures/scripts/sample.md"),
+        ws.join("scripts/001-ai-news.md"),
+    )
+    .unwrap();
+    let (code, stdout, stderr) = run(
+        ws,
+        &["generate", "scripts/001-ai-news.md", "--fake-tts", "--json"],
+    );
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    ws.join("generated/001-ai-news/project.vfp.json")
+}
+
+#[test]
+fn unknown_render_preset_is_a_clean_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("demo");
+    let (code, stdout, stderr) = run(tmp.path(), &["init", "demo"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    std::fs::copy(
+        repo_root().join("fixtures/scripts/sample.md"),
+        ws.join("scripts/001-ai-news.md"),
+    )
+    .unwrap();
+
+    let (code, _, stderr) = run(
+        &ws,
+        &[
+            "generate",
+            "scripts/001-ai-news.md",
+            "--fake-tts",
+            "--preset",
+            "does-not-exist",
+        ],
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("unknown --preset"), "{stderr}");
+    assert!(stderr.contains("youtube-1080p"), "{stderr}");
+}
+
+#[test]
+fn render_preset_overrides_project_video_settings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("demo");
+    let (code, stdout, stderr) = run(tmp.path(), &["init", "demo"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    std::fs::copy(
+        repo_root().join("fixtures/scripts/sample.md"),
+        ws.join("scripts/001-ai-news.md"),
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = run(
+        &ws,
+        &[
+            "generate",
+            "scripts/001-ai-news.md",
+            "--fake-tts",
+            "--preset",
+            "preview-low",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 0, "{stdout}{stderr}");
+
+    let project_path = ws.join("generated/001-ai-news/project.vfp.json");
+    let project: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project_path).unwrap()).unwrap();
+    assert_eq!(project["video"]["width"], 960);
+    assert_eq!(project["video"]["height"], 540);
+    assert_eq!(project["video"]["fps"], 24);
+}
+
+#[test]
+fn preview_fast_rejects_a_malformed_range() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("demo");
+    let (code, stdout, stderr) = run(tmp.path(), &["init", "demo"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let project_path = setup_generated_project(&ws);
+
+    let (code, _, stderr) = run(
+        &ws,
+        &[
+            "preview",
+            "fast",
+            project_path.to_str().unwrap(),
+            "--range-ms",
+            "not-a-range",
+        ],
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("--range-ms"), "{stderr}");
+}
+
+#[test]
+fn preview_fast_reports_ffmpeg_unavailable_offline() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("demo");
+    let (code, stdout, stderr) = run(tmp.path(), &["init", "demo"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let project_path = setup_generated_project(&ws);
+
+    let (code, _, stderr) = run(
+        &ws,
+        &[
+            "preview",
+            "fast",
+            project_path.to_str().unwrap(),
+            "--range-ms",
+            "0:5000",
+            "--preset",
+            "preview-low",
+        ],
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("FFmpeg is unavailable"), "{stderr}");
+}

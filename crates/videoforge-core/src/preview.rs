@@ -23,6 +23,34 @@ pub struct CharacterSpriteSet {
     pub open: PathBuf,
 }
 
+/// Video/audio encode settings a render preset (P1-6) bundles alongside
+/// resolution/fps: everything the renderer's own output-side FFmpeg options
+/// (`-c:v`/`-preset`/`-crf`/`-b:a`) need, decoupled from `videoforge.yaml`
+/// so a preset stays a fixed, named bundle rather than exposing arbitrary
+/// codec strings as a config surface. `Default` reproduces the encode
+/// settings this renderer has always used, so a `generate` run with no
+/// preset selected is byte-for-byte unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncodeSettings {
+    pub video_codec: &'static str,
+    /// x264's own `-preset` (encoder speed/efficiency trade-off, e.g.
+    /// `veryfast`/`medium`/`ultrafast`) — named `encoder_speed` here to avoid
+    /// colliding with "render preset" (`crate::preset::RenderPreset`).
+    pub encoder_speed: &'static str,
+    pub crf: u32,
+    pub audio_bitrate_kbps: u32,
+}
+impl Default for EncodeSettings {
+    fn default() -> Self {
+        Self {
+            video_codec: "libx264",
+            encoder_speed: "veryfast",
+            crf: 23,
+            audio_bitrate_kbps: 192,
+        }
+    }
+}
+
 pub struct PreviewRequest<'a> {
     pub project: &'a VideoProject,
     /// Directory the project's relative asset paths resolve against.
@@ -35,6 +63,15 @@ pub struct PreviewRequest<'a> {
     /// Caption/subtitle styling (P1-3): position, margin, colors, outline,
     /// background box.
     pub subtitle: &'a SubtitleConfig,
+    /// Encode settings (P1-6): codec/quality/audio-bitrate, normally a
+    /// render preset's; `EncodeSettings::default()` when none was selected.
+    pub encode: &'a EncodeSettings,
+    /// Render only `[start_ms, end_ms)` of the timeline (P1-7 fast preview),
+    /// via an output-side `-ss`/`-t` trim — the filter graph itself is
+    /// unchanged, so every absolute-timeline expression (fades, Ken Burns,
+    /// ducking windows) still means the same thing it would for a full
+    /// render. `None` renders the whole timeline.
+    pub range_ms: Option<(u64, u64)>,
     /// Resolved sprite sets for every `png_lipsync` character referenced on
     /// the project's `character_performance` track, keyed by character id.
     /// Empty for a project that uses no character, or only Live2D

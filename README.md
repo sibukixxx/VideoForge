@@ -33,6 +33,8 @@ MVP v0.1 の **Core + CLI**（設計書 Phase 1〜6）と Tauri GUI MVP（Phase 
 | FFmpeg preview（背景 + 音声配置 + 字幕 + speaker 名 + fade + Image/Character立ち絵/Video合成 + crop/fit/rotation/opacity + fade/pan/zoom transition + on-screen Text）(P1-1/P1-2/P1-5) | ✅ command builder + filtergraph escaping はテスト済。実 FFmpeg の統合テストは ffmpeg が見つかった時だけ実行（`docs/testing/ffmpeg-path-escaping.md`）。pan/zoom は実FFmpegでの検証は未実施 |
 | Audio Engine（Dialogue / BGM / SE を `amix` で合成、BGM の volume/loop/trim/fade-in-out/normalize、**Dialogue 発話区間での BGM ducking**）(P1-4) | ✅ command builder テスト済。Video clip 自身の音声トラックは未合成（次の課題） |
 | Subtitle Engine（`preview.subtitle`: position top/bottom・margin・font/outline color・outline width・background box・font_scale、話者別 `caption_color`、字幕と立ち絵の安全領域はどちらの edge でも共有）(P1-3) | ✅ command builder テスト済。`position: top` は実 FFmpeg 未検証。行の折返しは固定文字数の hard-wrap（CJK 前提） |
+| Render Presets（`youtube-1080p` / `youtube-short` / `preview-low`: 解像度・fps・コーデック・画質・音声ビットレートの一括指定、`videoforge generate --preset`）(P1-6) | ✅ command builder テスト済。実 FFmpeg でのビットレート/画質の検証は未実施 |
+| Fast Preview（`--range-ms` による出力側 `-ss`/`-t` トリム、`videoforge preview fast` による既存 project.vfp.json からの再レンダリング — パース・検証・TTS・タイムライン構築を全省略）(P1-7) | ✅ command builder / CLI テスト済。実 FFmpeg 未検証。manifest.json への記録なし |
 | YMM4 exporter（Template Patch 方式、Windows path materialize、Windows 限定） | ✅ 合成 fixture でテスト済。**実 YMM4 template での Phase 0 検証は未実施** |
 | Handoff bundle（dir + zip） | ✅ |
 | Tauri GUI（`apps/desktop`: Workspace / Script / Validate / Generate + 進捗 / Preview / Doctor / YMM4 export or bundle） | ✅ MVP。実機での起動確認は `apps/desktop/README.md` のチェックリスト |
@@ -70,6 +72,18 @@ videoforge export ymm4 sample-ymm4-bundle/project.vfp.json
 ```
 
 VOICEVOX / FFmpeg なしで配管だけ試す: `videoforge generate scripts/sample.md --fake-tts --no-preview`
+
+書き出しプリセット（P1-6）と高速プレビュー（P1-7）:
+
+```bash
+videoforge generate scripts/sample.md --preset youtube-1080p           # 1920x1080/30fps/crf18
+videoforge generate scripts/sample.md --preset preview-low --range-ms 0:15000   # 低解像度 + 範囲指定
+videoforge preview fast generated/sample/project.vfp.json --preset preview-low --range-ms 0:15000
+```
+
+`--preset` は `youtube-1080p` / `youtube-short` / `preview-low` の3種類（解像度・fps・コーデック・画質・音声ビットレートを一括指定）。
+`--range-ms START:END`（ミリ秒）を付けると `preview.fast.mp4` に出力され、増分ビルドキャッシュには参加しない。
+`videoforge preview fast <project.vfp.json>` は既存の生成結果からパース・検証・TTS・タイムライン構築を全てスキップして再レンダリングのみ行う。
 
 ## 台本フォーマット
 

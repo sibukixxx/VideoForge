@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use videoforge_core::config::{SubtitleConfig, SubtitlePosition};
 use videoforge_core::lipsync::{mouth_segments, LipSyncTrack, MouthState};
-use videoforge_core::preview::{CharacterSpriteSet, PreviewRequest};
+use videoforge_core::preview::{CharacterSpriteSet, EncodeSettings, PreviewRequest};
 use videoforge_core::project::{Clip, FitMode, Transform, VideoProject};
 use videoforge_core::AppError;
 
@@ -281,6 +281,15 @@ pub struct RenderPlan {
     /// Caption/subtitle styling (P1-3): position, margin, colors, outline,
     /// background box, font scale.
     pub subtitle: SubtitleConfig,
+    /// Encode settings (P1-6): codec/quality/audio-bitrate, normally a
+    /// render preset's; `EncodeSettings::default()` reproduces this
+    /// renderer's original hard-coded output options.
+    pub encode: EncodeSettings,
+    /// Render only `[start_ms, end_ms)` (P1-7 fast preview) via an
+    /// output-side `-ss`/`-t` trim — the filter graph is built for the full
+    /// timeline regardless, so every absolute-timeline expression keeps its
+    /// meaning.
+    pub range_ms: Option<(u64, u64)>,
 }
 
 impl RenderPlan {
@@ -304,6 +313,8 @@ impl RenderPlan {
             request.project,
             request.background_color,
             request.subtitle.clone(),
+            *request.encode,
+            request.range_ms,
             request.font.map(Path::to_path_buf),
             request.output.to_path_buf(),
             scratch_dir.to_path_buf(),
@@ -317,6 +328,8 @@ impl RenderPlan {
         project: &VideoProject,
         background_color: &str,
         subtitle: SubtitleConfig,
+        encode: EncodeSettings,
+        range_ms: Option<(u64, u64)>,
         font: Option<PathBuf>,
         output: PathBuf,
         scratch_dir: PathBuf,
@@ -410,6 +423,8 @@ impl RenderPlan {
             character_overlays,
             visual_layers,
             subtitle,
+            encode,
+            range_ms,
         }
     }
 
@@ -1150,24 +1165,41 @@ pub fn build_args(plan: &RenderPlan) -> Vec<OsString> {
 
     let filter = format!("{};{}", plan.video_filter(), plan.audio_filter());
     args.extend(["-filter_complex", &filter, "-map", "[v]", "-map", "[aout]"].map(OsString::from));
+    // A range (P1-7 fast preview) is an *output*-side `-ss`/`-t` trim: the
+    // filter graph above is still built for the whole timeline, so every
+    // absolute-timeline expression (fades, Ken Burns, ducking windows) keeps
+    // meaning what it always has. FFmpeg decodes/filters everything and
+    // drops what falls outside the window — accurate, if not maximally
+    // fast, and correct is what a "fast preview" must never trade away.
+    if let Some((start_ms, end_ms)) = plan.range_ms {
+        args.extend(
+            [
+                "-ss",
+                &fmt_secs(start_ms as f64 / 1000.0),
+                "-t",
+                &fmt_secs((end_ms.saturating_sub(start_ms)) as f64 / 1000.0),
+            ]
+            .map(OsString::from),
+        );
+    } else {
+        args.extend(["-t", &fmt_secs(plan.total_ms as f64 / 1000.0)].map(OsString::from));
+    }
     args.extend(
         [
-            "-t",
-            &fmt_secs(plan.total_ms as f64 / 1000.0),
             "-r",
             &plan.fps.to_string(),
             "-c:v",
-            "libx264",
+            plan.encode.video_codec,
             "-preset",
-            "veryfast",
+            plan.encode.encoder_speed,
             "-crf",
-            "23",
+            &plan.encode.crf.to_string(),
             "-pix_fmt",
             "yuv420p",
             "-c:a",
             "aac",
             "-b:a",
-            "192k",
+            &format!("{}k", plan.encode.audio_bitrate_kbps),
             "-movflags",
             "+faststart",
         ]
@@ -1359,6 +1391,8 @@ mod tests {
             &project(with_background),
             "#1e1e2e",
             SubtitleConfig::default(),
+            EncodeSettings::default(),
+            None,
             font.map(PathBuf::from),
             PathBuf::from("/out/preview.mp4"),
             PathBuf::from("/proj/.preview.mp4.tmp"),
@@ -1390,6 +1424,84 @@ mod tests {
         assert_eq!(s.last().unwrap(), "/out/preview.mp4");
     }
 
+    // -------------------------------------------------------------- render presets / fast preview (P1-6/P1-7)
+
+    fn plan_with_encode_and_range(
+        encode: EncodeSettings,
+        range_ms: Option<(u64, u64)>,
+    ) -> RenderPlan {
+        RenderPlan::build(
+            &project(true),
+            "#1e1e2e",
+            SubtitleConfig::default(),
+            encode,
+            range_ms,
+            None,
+            PathBuf::from("/out/preview.mp4"),
+            PathBuf::from("/proj/.preview.mp4.tmp"),
+            ".preview.mp4.tmp".into(),
+            Vec::new(),
+        )
+    }
+
+    fn find_arg(args: &[String], flag: &str) -> String {
+        args[args.iter().position(|x| x == flag).unwrap() + 1].clone()
+    }
+
+    #[test]
+    fn build_args_uses_the_original_hard_coded_encode_settings_by_default() {
+        let args: Vec<String> =
+            build_args(&plan_with_encode_and_range(EncodeSettings::default(), None))
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+        assert_eq!(find_arg(&args, "-c:v"), "libx264");
+        assert_eq!(find_arg(&args, "-preset"), "veryfast");
+        assert_eq!(find_arg(&args, "-crf"), "23");
+        assert_eq!(find_arg(&args, "-b:a"), "192k");
+    }
+
+    #[test]
+    fn build_args_applies_a_render_presets_encode_settings() {
+        let encode = EncodeSettings {
+            video_codec: "libx264",
+            encoder_speed: "medium",
+            crf: 18,
+            audio_bitrate_kbps: 256,
+        };
+        let args: Vec<String> = build_args(&plan_with_encode_and_range(encode, None))
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(find_arg(&args, "-preset"), "medium");
+        assert_eq!(find_arg(&args, "-crf"), "18");
+        assert_eq!(find_arg(&args, "-b:a"), "256k");
+    }
+
+    #[test]
+    fn build_args_range_ms_adds_an_output_side_ss_and_t_trim() {
+        let args: Vec<String> = build_args(&plan_with_encode_and_range(
+            EncodeSettings::default(),
+            Some((2000, 5500)),
+        ))
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+        assert_eq!(find_arg(&args, "-ss"), "2");
+        assert_eq!(find_arg(&args, "-t"), "3.5");
+    }
+
+    #[test]
+    fn build_args_without_a_range_uses_the_full_timeline_duration_for_t() {
+        let args: Vec<String> =
+            build_args(&plan_with_encode_and_range(EncodeSettings::default(), None))
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+        assert!(!args.contains(&"-ss".to_string()));
+        assert_eq!(find_arg(&args, "-t"), "7.29");
+    }
+
     #[test]
     fn flat_color_when_no_background() {
         let args = build_args(&plan(false, Some(r"C:\Windows\Fonts\meiryo.ttc")));
@@ -1414,6 +1526,8 @@ mod tests {
             &p,
             "black",
             SubtitleConfig::default(),
+            EncodeSettings::default(),
+            None,
             None,
             "o.mp4".into(),
             "/p/.t".into(),
@@ -1515,6 +1629,8 @@ mod tests {
             &project(true),
             "#000000",
             SubtitleConfig::default(),
+            EncodeSettings::default(),
+            None,
             None,
             root.join("preview.mp4"),
             scratch.clone(),
@@ -1571,6 +1687,8 @@ mod tests {
             &project(false),
             "#000000",
             SubtitleConfig::default(),
+            EncodeSettings::default(),
+            None,
             None,
             "o.mp4".into(),
             "/p/.t".into(),
@@ -1699,6 +1817,8 @@ mod tests {
             &project(false),
             "#000000",
             subtitle,
+            EncodeSettings::default(),
+            None,
             None,
             "o.mp4".into(),
             "/p/.t".into(),
@@ -1726,6 +1846,8 @@ mod tests {
             &p,
             "#000000",
             subtitle,
+            EncodeSettings::default(),
+            None,
             None,
             "o.mp4".into(),
             "/p/.t".into(),
@@ -2015,6 +2137,8 @@ mod tests {
             &project(false),
             "#000000",
             SubtitleConfig::default(),
+            EncodeSettings::default(),
+            None,
             None,
             "o.mp4".into(),
             "/p/.t".into(),
@@ -2246,6 +2370,8 @@ mod tests {
             &p,
             "#000000",
             SubtitleConfig::default(),
+            EncodeSettings::default(),
+            None,
             None,
             "o.mp4".into(),
             "/p/.t".into(),
@@ -2284,6 +2410,8 @@ mod tests {
             &p,
             "#000000",
             SubtitleConfig::default(),
+            EncodeSettings::default(),
+            None,
             None,
             "o.mp4".into(),
             dir.path().join("scratch"),
@@ -2331,6 +2459,8 @@ mod tests {
             p,
             "#000000",
             SubtitleConfig::default(),
+            EncodeSettings::default(),
+            None,
             None,
             "o.mp4".into(),
             "/p/.t".into(),

@@ -32,6 +32,11 @@ cargo test -p videoforge-project -- --nocapture
 cargo run -p videoforge-cli -- doctor --fake-tts --json
 cargo run -p videoforge-cli -- generate scripts/sample.md --fake-tts --no-preview
 cargo run -p videoforge-cli -- character inspect fixtures/character/mock-character/manifest.yaml
+
+# render presets (P1-6) and fast preview (P1-7)
+cargo run -p videoforge-cli -- generate scripts/sample.md --preset youtube-1080p
+cargo run -p videoforge-cli -- generate scripts/sample.md --preset preview-low --range-ms 0:15000
+cargo run -p videoforge-cli -- preview fast generated/sample/project.vfp.json --preset preview-low --range-ms 0:15000
 ```
 
 CI (`docs/ci/github-actions-ci.yml`, not yet under `.github/workflows/`) runs fmt → clippy →
@@ -167,6 +172,38 @@ character mouth overlays, applied here to an audio `volume` filter instead of a 
 there is no per-clip override yet. A video clip's own embedded audio track is not part of this mix
 (see "Known gaps").
 
+### Render presets and fast preview (P1-6/P1-7)
+
+`core::preset` is a fixed catalog (`PRESETS: &[RenderPreset]`) of three named bundles —
+`youtube-1080p`, `youtube-short`, `preview-low` — each pairing a resolution/fps with
+`preview::EncodeSettings` (codec/encoder-speed/CRF/audio-bitrate). A preset is deliberately *not* a
+free-form config surface (no arbitrary codec strings in `videoforge.yaml`): `videoforge generate
+--preset <name>` and `videoforge preview fast --preset <name>` both just look a name up. Applying one
+overrides `VideoProject::video` (width/height/fps) *after* `videoforge_timeline::build` — safe only
+because every clip's `Transform` position is a normalized `0.0..=1.0` fraction, never a pixel value,
+so changing the render resolution never touches placement math; `project.vfp.json` then correctly
+records the resolution actually rendered. `EncodeSettings` isn't part of the project IR at all (CRF
+etc. aren't scheduling data), so it travels through `PreviewRequest::encode` the same way
+`background_color`/`subtitle` do, and `buildcache::preview_fingerprint` hashes it too — a preset
+switch at the same resolution must still invalidate the P0-4 cache.
+
+Fast preview (P1-7) has two independent parts. (1) A `generate --range-ms START:END` renders the
+whole pipeline as usual but adds an *output-side* `-ss`/`-t` trim in `build_args` — the filter graph
+is still built for the full timeline, so every absolute-timeline expression (fades, Ken Burns,
+ducking windows) keeps meaning what it always has; FFmpeg just decodes/filters everything and drops
+what falls outside the window. A ranged generate writes to `preview.fast.mp4`
+(`generate::PREVIEW_FAST_FILE`), never `preview.mp4`, and skips the P0-4 cache entirely — it is a
+disposable, exploratory render, not "the" cached preview. (2) `videoforge preview fast
+<project.vfp.json>` (`core::fastpreview::render`) skips parsing/validation/TTS/timeline scheduling
+altogether and re-renders straight from an *already generated* `project.vfp.json` — the genuinely
+"fast" half, since TTS re-synthesis (the slow step `generate` would otherwise repeat, cache hits
+aside) never runs at all. It re-resolves `png_lipsync` character sprites from the character manifest
+(cheap: no audio, no lip-sync analysis — the project's `character_performance` clips already carry
+their lip-sync file paths from the original `generate`). A "selected scene" is just a `[start_ms,
+end_ms)` range by another name; turning a scene/dialogue index into those bounds (e.g. by reading a
+cue's timing out of `captions.srt`) is left to the caller — this module only needs the resolved
+range.
+
 ### Incremental build (P0-4, minimal)
 
 TTS already skips synthesis per-dialogue via `TtsCache` (keyed on engine version + voice params +
@@ -261,6 +298,16 @@ These span files and are easy to break silently:
   safe-area/character-overlap axis is structurally enforced). Per-speaker styling (P1-3's
   "speaker-style") covers only caption text color (`SpeakerConfig::caption_color`); font/size/
   outline/background remain global (`preview.subtitle`), not per-speaker.
+- Render presets (P1-6) are a fixed catalog of three names — no user-defined preset, and no way to
+  override a single field of a preset (e.g. "youtube-1080p but crf 20") without picking a name and
+  accepting its whole bundle. `EncodeSettings`/`RenderPreset` are command-builder-tested only, same
+  caveat as the rest of this list: none of the three presets' actual encoder output (bitrate/quality
+  in practice) has been checked against a real FFmpeg. Fast preview's (P1-7) `-ss`/`-t` output-side
+  trim is likewise unverified against a real FFmpeg — it is the standard, well-documented technique
+  for trimming a filter_complex output without touching the graph, but this repo has not rendered one.
+  `videoforge preview fast` also has no manifest entry of its own (it does not write or update
+  `manifest.json` at all) and no "selected scene" CLI convenience — a scene has to be turned into a
+  millisecond range by the caller (e.g. from `captions.srt`) before it reaches `--range-ms`.
 - The CI workflow is parked in `docs/ci/` because the authoring session could not create files
   under `.github/workflows/`. Enabling it is a `git mv` (see `docs/ci/README.md`).
 - The Tauri GUI (`apps/desktop`) builds and its command layer is unit-tested, but it has not been

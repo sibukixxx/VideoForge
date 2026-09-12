@@ -68,6 +68,15 @@ enum Command {
         /// Keep .generated-tmp on failure for debugging
         #[arg(long)]
         keep_tmp: bool,
+        /// Render preset (P1-6) bundling resolution/fps/codec/quality/audio:
+        /// youtube-1080p, youtube-short, preview-low
+        #[arg(long, value_name = "NAME")]
+        preset: Option<String>,
+        /// Fast preview (P1-7): render only this millisecond range of the
+        /// timeline, e.g. `2000:15000`. Writes to preview.fast.mp4 instead
+        /// of preview.mp4 and skips the incremental-build cache.
+        #[arg(long, value_name = "START:END")]
+        range_ms: Option<String>,
         #[command(flatten)]
         tts: TtsArgs,
     },
@@ -92,6 +101,31 @@ enum Command {
     Assets {
         /// Path to project.vfp.json, or its directory, or asset-registry.json directly
         project: PathBuf,
+    },
+    /// Re-render a preview without a full generate (P1-7)
+    Preview {
+        #[command(subcommand)]
+        action: PreviewAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PreviewAction {
+    /// Re-render preview.fast.mp4 from an existing project.vfp.json —
+    /// skips parse/validate/TTS/timeline entirely, optionally on a
+    /// millisecond range and/or at a lower-resolution render preset
+    Fast {
+        /// Path to project.vfp.json, or its directory
+        project: PathBuf,
+        /// Millisecond range START:END to render (omit for the whole timeline)
+        #[arg(long, value_name = "START:END")]
+        range_ms: Option<String>,
+        /// Render preset (P1-6): youtube-1080p, youtube-short, preview-low
+        #[arg(long, value_name = "NAME")]
+        preset: Option<String>,
+        /// Output path (default: preview.fast.mp4 next to the project file)
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -215,6 +249,8 @@ async fn main() -> ExitCode {
             srt_speaker,
             no_cache,
             keep_tmp,
+            preset,
+            range_ms,
             tts,
         } => {
             commands::generate(
@@ -225,6 +261,8 @@ async fn main() -> ExitCode {
                     srt_speaker,
                     no_cache,
                     keep_tmp,
+                    preset,
+                    range_ms,
                     fake_tts: tts.fake_tts,
                     endpoint: tts.endpoint,
                 },
@@ -267,6 +305,15 @@ async fn main() -> ExitCode {
             }
         },
         Command::Assets { project } => commands::assets(&ctx, project),
+        Command::Preview {
+            action:
+                PreviewAction::Fast {
+                    project,
+                    range_ms,
+                    preset,
+                    out,
+                },
+        } => commands::preview_fast(&ctx, project, range_ms, preset, out).await,
     };
     match result {
         Ok(code) => code,
