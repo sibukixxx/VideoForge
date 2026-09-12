@@ -1665,6 +1665,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "videoforge-timeline-wasm"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "videoforge-project",
+ "videoforge-timeline",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "videoforge-voicevox"
 version = "0.1.0"
 dependencies = [

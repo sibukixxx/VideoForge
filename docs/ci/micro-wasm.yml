@@ -1,0 +1,51 @@
+name: Micro-Wasm Phase 0 and P1
+
+# Parked while GitHub Actions is unavailable. Copy this file to
+# .github/workflows/micro-wasm.yml when CI can run again.
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - name: Rust quality gates
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+      - name: Build Wasm target
+        run: cargo build -p videoforge-timeline-wasm --target wasm32-unknown-unknown --release
+      - name: Build browser package
+        working-directory: experiments/micro-wasm
+        run: wasm-pack build ../../crates/videoforge-timeline-wasm --target web --release --out-dir ../../experiments/micro-wasm/pkg
+      - name: Native/Wasm parity smoke test
+        working-directory: experiments/micro-wasm
+        run: npm run smoke
+      - name: Benchmark and record binary size
+        run: |
+          cargo run -p videoforge-timeline-wasm --release --example native_benchmark | tee /tmp/native-benchmark.txt
+          cd experiments/micro-wasm
+          npm run benchmark | tee /tmp/wasm-js-benchmark.txt
+          npm run size | tee /tmp/wasm-size.json
+          {
+            echo '## Micro-Wasm measurements'
+            echo '```text'
+            cat /tmp/native-benchmark.txt
+            cat /tmp/wasm-js-benchmark.txt
+            cat /tmp/wasm-size.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

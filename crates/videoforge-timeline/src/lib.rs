@@ -268,9 +268,14 @@ pub fn build(input: TimelineInput) -> Result<VideoProject, TimelineError> {
     Ok(project)
 }
 
-/// Turn visual events into image / character / bgm / se tracks (only the
-/// non-empty ones), applying the duration rules from the module docs.
-fn place_visual_events(
+/// Place resolved visual events using an already scheduled dialogue timeline.
+///
+/// Returns image / character / bgm / se tracks (only the non-empty ones),
+/// applying the duration rules from the module docs.
+///
+/// This is public so non-native adapters can reuse the exact placement rules;
+/// it performs no filesystem, network, process, or renderer access.
+pub fn place_visual_events(
     events: &[VisualEvent],
     scheduled: &[ScheduledDialogue],
     total_ms: u64,

@@ -44,6 +44,11 @@ from the frontend).
 Out of scope, on purpose: a timeline editor, AI script generation, trend
 detection, YouTube upload, asset management.
 
+VOICEVOXの自動起動は未実装。既存Engineの再利用とVideoForgeが起動した子プロセスの
+所有権を区別する案は
+[`docs/architecture/voicevox-managed-lifecycle.md`](../../docs/architecture/voicevox-managed-lifecycle.md)
+を参照。
+
 ## Development
 
 Prerequisites: Rust stable, Node 20+, pnpm, and the
