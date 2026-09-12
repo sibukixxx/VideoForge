@@ -2,10 +2,11 @@
 
 How the character/Live2D feature (`docs/character-system.md`) fits into
 VideoForge's existing generation pipeline (`core::generate::generate`,
-documented in `CLAUDE.md`). This is the P0 vertical slice: everything below
-is implemented and tested up to "a `character_performance` track with a
-lip-sync file on disk"; frame rendering and FFmpeg composition are Phase 1
-(`docs/live2d-renderer-decision.md`).
+documented in `CLAUDE.md`). Two character paths are deliberately separate:
+
+- static transparent PNG stand-ins (`@character`) are composited by FFmpeg;
+- Live2D models produce performance/lip-sync data, but frame rendering remains Phase 1
+  (`docs/live2d-renderer-decision.md`).
 
 ## Where it sits in `generate()`
 
@@ -50,7 +51,11 @@ Timeline (videoforge_timeline::build)
 Project IR (project.vfp.json) + captions.srt (unchanged consumers)
   │
   ▼
-Preview (FFmpeg) — unaware of the new track; renders exactly as before.
+Preview (FFmpeg)
+  • static CharacterClip PNGs are overlaid by start/duration and layer
+  • alpha, position, scale, rotation and opacity are preserved
+  • captions render above character PNGs
+  • CharacterPerformanceClip / Live2D frames are not rendered yet
   │
   ▼
 manifest.json
@@ -68,9 +73,9 @@ generated/<slug>/
  ├── project.vfp.json    (adds a character_performance track when used)
  ├── captions.srt                                   (unchanged)
  ├── manifest.json                                  (unchanged shape)
- └── preview.mp4 / preview skipped                  (unchanged — does not
-                                                        yet reflect the
-                                                        character at all)
+ └── preview.mp4 / preview skipped                  (static PNG stand-ins
+                                                       are visible; Live2D
+                                                       output is not yet rendered)
 ```
 
 `project.vfp.json` — the single source of truth (`CLAUDE.md`'s own
@@ -118,13 +123,14 @@ why phoneme analysis is explicitly out of scope for P0 (design §10, §30).
 
 ## Phase 1: what plugs in next, and where
 
-Per `docs/live2d-renderer-decision.md`, a `CharacterRenderer` trait
+Static PNG composition is now the reference FFmpeg overlay path. Per
+`docs/live2d-renderer-decision.md`, a future `CharacterRenderer` trait
 (mirroring `TtsEngine`/`PreviewRenderer`) will consume exactly the data this
 pipeline already produces — a character id + model reference (from the
 character manifest) + a `CharacterPerformanceClip` (expression, motion,
 `lip_sync` curve) — and emit a transparent RGBA frame sequence under
-`assets/character/<id>/frames/`. `videoforge-preview`'s existing FFmpeg
-overlay step then composites those frames over the background, alongside
+`assets/character/<id>/frames/`. `videoforge-preview`'s FFmpeg overlay
+step can then composite those frames over the background, alongside
 the existing audio/caption tracks, exactly as design §16 lays out:
 
 ```
