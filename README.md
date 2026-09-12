@@ -145,9 +145,9 @@ directive は直後の台詞と一緒に始まり、素材は Workspace 相対�
 保持され、字幕は立ち絵より前面に描画されます。
 
 ```markdown
-@character zundamon[x=0.78, y=0.56, scale=0.9, opacity=1.0, layer=1]
+@character zundamon[src=assets/character/zundamon/closed.png, mouth_half=assets/character/zundamon/half.png, mouth_open=assets/character/zundamon/open.png, x=0.78, y=0.56, scale=0.9, opacity=1.0, layer=1]
 ずんだもん:
-ぼくの透過PNGが右側に表示されるのだ。
+3段階の透過PNGが音声に合わせて切り替わるのだ。
 
 @character metan[src=assets/character/metan/talking.png, x=0.22, y=0.56, scale=0.9]
 四国めたん:
@@ -156,7 +156,9 @@ srcを指定すれば別の表情画像も使えます。
 
 `x` / `y` は画面に対する中心位置（0.0〜1.0）、`scale` は倍率、`opacity` は
 0.0〜1.0、`rotation_deg` は回転角、`layer` は重なり順です。素材の利用規約と
-キャラクターごとのクレジット条件は、配布元で必ず確認してください。
+キャラクターごとのクレジット条件は、配布元で必ず確認してください。3枚は同じ寸法・
+同じキャラクター位置で、全身を合成済みのPNGにします。詳細は
+[`docs/character-png-lipsync.md`](docs/character-png-lipsync.md)を参照してください。
 
 長さの既定（`duration_ms` 省略時）: `@image` は次の `@image` まで、`@character` は同じ話者の次の立ち絵まで、
 `@bgm` は次の `@bgm` まで、`@se` は 1 秒。素材が無い directive は warning になり、その clip だけ飛ばして生成は続く。
