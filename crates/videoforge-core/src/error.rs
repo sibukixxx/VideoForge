@@ -62,6 +62,10 @@ pub enum AppError {
     },
     #[error("lip-sync generation failed for dialogue {index}: {reason}")]
     LipSyncGenerationFailed { index: usize, reason: String },
+    #[error("PNG sprite not found: {path}")]
+    PngSpriteNotFound { path: PathBuf },
+    #[error("PNG sprite {path} is invalid: {reason}")]
+    PngSpriteInvalid { path: PathBuf, reason: String },
 
     #[error("FFmpeg is unavailable: {0}")]
     FfmpegUnavailable(String),
@@ -157,6 +161,8 @@ impl AppError {
             AppError::ExpressionNotFound { .. } => "expression_not_found",
             AppError::MotionNotFound { .. } => "motion_not_found",
             AppError::LipSyncGenerationFailed { .. } => "lipsync_generation_failed",
+            AppError::PngSpriteNotFound { .. } => "png_sprite_not_found",
+            AppError::PngSpriteInvalid { .. } => "png_sprite_invalid",
             AppError::FfmpegUnavailable(_) => "ffmpeg_unavailable",
             AppError::PreviewRenderFailed(_) => "preview_render_failed",
             AppError::InvalidTemplate { .. } => "invalid_template",
@@ -250,6 +256,12 @@ impl From<videoforge_character::CharacterError> for AppError {
             },
             C::ModelNotFound { path } => AppError::Live2dModelNotFound { path },
             C::ModelInvalid { path, reason } => AppError::Live2dModelInvalid { path, reason },
+            C::PngNotFound { path } => AppError::PngSpriteNotFound { path },
+            C::PngInvalid { path, reason } => AppError::PngSpriteInvalid { path, reason },
+            C::PngNotTransparent { path } => AppError::PngSpriteInvalid {
+                path,
+                reason: "no alpha channel (must be exported as RGBA or grayscale+alpha)".into(),
+            },
             other => AppError::CharacterManifestInvalid {
                 path: PathBuf::new(),
                 reason: other.to_string(),

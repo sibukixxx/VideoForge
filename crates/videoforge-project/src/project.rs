@@ -99,9 +99,22 @@ pub enum TrackKind {
     /// Live2D/VOICEVOX character performance data (expression, motion,
     /// lip-sync curve) — distinct from `Character` (立ち絵 stand-in images).
     CharacterPerformance,
+    /// A general video clip (P1-2) — distinct from `Character`/`Image`,
+    /// which are always still images.
+    Video,
+    /// On-screen text (titles, labels) — distinct from `Caption`, which is
+    /// always tied to a dialogue's speaker/timing (P1-1).
+    Text,
 }
 
 /// A clip on a track. Tagged by `type` so exporters can dispatch on it.
+///
+/// There is no separate "OverlayClip" variant (design sketch in P1-1):
+/// an overlay (a watermark, a lower-third, a callout image) is exactly an
+/// [`ImageClip`] with `presentation.role` set to `"overlay"` — layering,
+/// position and opacity already come from the same [`Transform`] every
+/// visual clip carries, so a second type would duplicate `ImageClip`
+/// field-for-field rather than add anything.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Clip {
@@ -113,6 +126,8 @@ pub enum Clip {
     Bgm(BgmClip),
     SoundEffect(SoundEffectClip),
     CharacterPerformance(CharacterPerformanceClip),
+    Video(VideoClip),
+    Text(TextClip),
 }
 
 impl Clip {
@@ -126,6 +141,8 @@ impl Clip {
             Clip::Bgm(c) => &c.id,
             Clip::SoundEffect(c) => &c.id,
             Clip::CharacterPerformance(c) => &c.id,
+            Clip::Video(c) => &c.id,
+            Clip::Text(c) => &c.id,
         }
     }
 
@@ -139,6 +156,8 @@ impl Clip {
             Clip::Bgm(c) => c.start_ms,
             Clip::SoundEffect(c) => c.start_ms,
             Clip::CharacterPerformance(c) => c.start_ms,
+            Clip::Video(c) => c.start_ms,
+            Clip::Text(c) => c.start_ms,
         }
     }
 
@@ -152,6 +171,8 @@ impl Clip {
             Clip::Bgm(c) => c.duration_ms,
             Clip::SoundEffect(c) => c.duration_ms,
             Clip::CharacterPerformance(c) => c.duration_ms,
+            Clip::Video(c) => c.duration_ms,
+            Clip::Text(c) => c.duration_ms,
         }
     }
 
@@ -170,6 +191,8 @@ impl Clip {
             Clip::Bgm(c) => Some(&c.source),
             Clip::SoundEffect(c) => Some(&c.source),
             Clip::CharacterPerformance(c) => Some(&c.lip_sync),
+            Clip::Video(c) => Some(&c.source),
+            Clip::Text(_) => None,
         }
     }
 }
@@ -197,6 +220,12 @@ pub struct CaptionClip {
     /// Display name as written in the script (e.g. `霊夢`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker_display: Option<String>,
+    /// Per-speaker caption color override (P1-3, `SpeakerConfig::caption_color`),
+    /// resolved once at generate time — same "resolve early, bake into the
+    /// IR" pattern as a character's named VOICEVOX voice. `None` falls back
+    /// to `preview.subtitle.font_color` at render time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -228,7 +257,21 @@ pub enum FitMode {
     None,
 }
 
-/// Static placement of a visual clip (image, character) in the frame.
+/// A rectangular region of a source image/frame to keep, before `fit`/`scale`
+/// are applied — normalized to the *source*, not the output frame: `0,0` is
+/// its top-left corner, `1,1` its bottom-right. `width`/`height` are
+/// fractions of the source's own size, so `{x:0,y:0,width:1,height:1}` (not
+/// the same as omitting `crop`, but equivalent in effect) keeps the whole
+/// source.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CropRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Static placement of a visual clip (image, character, video) in the frame.
 ///
 /// Coordinate system, independent of any NLE:
 /// * `x`, `y` are the clip's **centre**, normalized to the frame:
@@ -237,6 +280,7 @@ pub enum FitMode {
 /// * `rotation_deg` is clockwise around the centre.
 /// * `opacity` is `0.0` (invisible) … `1.0` (opaque).
 /// * `layer` is the z-order; a larger value is drawn in front.
+/// * `crop`, when set, is applied to the source *before* `fit`/`scale` (P1-1).
 ///
 /// Every field is a plain value: no keyframes, easing or anything that varies
 /// over time. Time-dependent presentation (fade, slide, …) is expressed as
@@ -252,10 +296,12 @@ pub struct Transform {
     pub opacity: f32,
     pub layer: i32,
     pub fit: FitMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crop: Option<CropRect>,
 }
 
 impl Default for Transform {
-    /// Centred, fitted, fully opaque, unrotated, on layer 0.
+    /// Centred, fitted, fully opaque, unrotated, on layer 0, uncropped.
     fn default() -> Self {
         Self {
             x: 0.5,
@@ -265,6 +311,7 @@ impl Default for Transform {
             opacity: 1.0,
             layer: 0,
             fit: FitMode::Contain,
+            crop: None,
         }
     }
 }
@@ -304,6 +351,65 @@ pub struct CharacterClip {
     pub extra: BTreeMap<String, serde_json::Value>,
 }
 
+/// A video clip (P1-2): a general video asset placed on the timeline,
+/// distinct from `Character`/`Image` (always still images).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoClip {
+    pub id: String,
+    pub source: RelativeAssetPath,
+    /// Where this clip sits on the *output* timeline.
+    pub start_ms: u64,
+    /// How long this clip plays on the output timeline. May exceed the
+    /// source's own remaining length after `trim_start_ms` only when
+    /// `looping` is set — otherwise the renderer holds the last frame for
+    /// the remainder (same "never desync the timeline" rule as any other
+    /// clip; see `videoforge-timeline`'s placement rules).
+    pub duration_ms: u64,
+    /// In-point within the source file — the source plays starting from
+    /// this offset, not from its own beginning.
+    #[serde(default)]
+    pub trim_start_ms: u64,
+    /// Linear gain applied to the source's own audio track, `1.0` = as
+    /// authored, `0.0` = silent regardless of `muted`.
+    #[serde(default = "default_volume")]
+    pub volume: f32,
+    /// Drop the source's audio track entirely (distinct from `volume: 0.0`
+    /// so a renderer need not decode/mix audio it will discard).
+    #[serde(default)]
+    pub muted: bool,
+    /// Repeat the source from `trim_start_ms` to fill `duration_ms` when the
+    /// source is shorter, instead of holding the last frame.
+    #[serde(default)]
+    pub looping: bool,
+    #[serde(default)]
+    pub transform: Transform,
+    /// Semantic role / intent (issue #16); `None` when the author said nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<Presentation>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// On-screen text (a title, a label) — distinct from `CaptionClip`, which is
+/// always tied to a dialogue's speaker/timing (P1-1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextClip {
+    pub id: String,
+    pub text: String,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub transform: Transform,
+    /// Hex color (e.g. `#ffffff`); `None` uses the renderer's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Semantic role / intent (issue #16); `None` when the author said nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<Presentation>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
 /// One dialogue's Live2D/VOICEVOX character performance: which character,
 /// what expression/motion it plays, and a reference to its deterministic
 /// lip-sync amplitude curve (design §9, §10, §11). Distinct from
@@ -328,6 +434,14 @@ pub struct CharacterPerformanceClip {
     /// audio (`core::lipsync::LipSyncTrack`, referenced rather than inlined
     /// so `project.vfp.json` stays small).
     pub lip_sync: RelativeAssetPath,
+    /// On-screen placement (P0-1), derived once from the character
+    /// manifest's `presentation` and repeated on every clip for that
+    /// character — same field, same coordinate system, as `ImageClip`/
+    /// `CharacterClip::transform`, not a second placement concept.
+    /// `#[serde(default)]` so older `project.vfp.json` files without this
+    /// field still load (additive, no `SCHEMA_VERSION` bump).
+    #[serde(default)]
+    pub transform: Transform,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -347,12 +461,27 @@ pub struct BgmClip {
     pub source: RelativeAssetPath,
     pub start_ms: u64,
     pub duration_ms: u64,
-    /// Linear gain, `1.0` = as authored.
+    /// Linear gain, `1.0` = as authored — this is the *base* level; the
+    /// renderer additionally ducks it under any overlapping dialogue
+    /// (P1-4), so this is "as loud as it gets", not "as loud as it always
+    /// plays".
     #[serde(default = "default_volume")]
     pub volume: f32,
     /// Repeat the source until `duration_ms` is filled instead of going silent.
     #[serde(default)]
     pub looping: bool,
+    /// In-point within the source file (P1-4), same rule as `VideoClip::trim_start_ms`.
+    #[serde(default)]
+    pub trim_start_ms: u64,
+    /// Linear ramp up from silence at the clip's own start.
+    #[serde(default)]
+    pub fade_in_ms: u64,
+    /// Linear ramp down to silence at the clip's own end.
+    #[serde(default)]
+    pub fade_out_ms: u64,
+    /// Apply loudness normalization (FFmpeg `dynaudnorm`) to this clip alone.
+    #[serde(default)]
+    pub normalize: bool,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -472,6 +601,26 @@ impl VideoProject {
             .collect()
     }
 
+    pub fn video_clips(&self) -> Vec<&VideoClip> {
+        self.tracks_of(TrackKind::Video)
+            .flat_map(|t| t.clips.iter())
+            .filter_map(|c| match c {
+                Clip::Video(a) => Some(a),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn text_clips(&self) -> Vec<&TextClip> {
+        self.tracks_of(TrackKind::Text)
+            .flat_map(|t| t.clips.iter())
+            .filter_map(|c| match c {
+                Clip::Text(a) => Some(a),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// All clips across all tracks.
     pub fn clips(&self) -> impl Iterator<Item = &Clip> {
         self.tracks.iter().flat_map(|t| t.clips.iter())
@@ -572,6 +721,7 @@ mod tests {
                 duration_ms: 3410,
                 speaker: "reimu".into(),
                 speaker_display: Some("霊夢".into()),
+                color: None,
                 extra: BTreeMap::new(),
             })],
         });
@@ -647,6 +797,7 @@ mod tests {
                     opacity: 0.9,
                     layer: 10,
                     fit: FitMode::Cover,
+                    crop: None,
                 },
                 presentation: Some(Presentation {
                     role: Some("primary_visual".into()),
@@ -680,6 +831,10 @@ mod tests {
                 duration_ms: 3410,
                 volume: 0.6,
                 looping: true,
+                trim_start_ms: 0,
+                fade_in_ms: 0,
+                fade_out_ms: 0,
+                normalize: false,
                 extra: BTreeMap::new(),
             })],
         });
@@ -692,6 +847,45 @@ mod tests {
                 start_ms: 1200,
                 duration_ms: 800,
                 volume: 1.0,
+                extra: BTreeMap::new(),
+            })],
+        });
+        p.tracks.push(Track {
+            id: "video".into(),
+            kind: TrackKind::Video,
+            clips: vec![Clip::Video(VideoClip {
+                id: "video-001".into(),
+                source: RelativeAssetPath::new("assets/video/clip.mp4").unwrap(),
+                start_ms: 0,
+                duration_ms: 3410,
+                trim_start_ms: 250,
+                volume: 0.8,
+                muted: false,
+                looping: true,
+                transform: Transform {
+                    crop: Some(CropRect {
+                        x: 0.1,
+                        y: 0.0,
+                        width: 0.8,
+                        height: 1.0,
+                    }),
+                    ..Transform::default()
+                },
+                presentation: None,
+                extra: BTreeMap::new(),
+            })],
+        });
+        p.tracks.push(Track {
+            id: "text".into(),
+            kind: TrackKind::Text,
+            clips: vec![Clip::Text(TextClip {
+                id: "text-001".into(),
+                text: "Title Card".into(),
+                start_ms: 0,
+                duration_ms: 1000,
+                transform: Transform::default(),
+                color: Some("#ffcc00".into()),
+                presentation: None,
                 extra: BTreeMap::new(),
             })],
         });
@@ -712,6 +906,7 @@ mod tests {
                 motion: "wave".into(),
                 lip_sync: RelativeAssetPath::new("assets/character/tsumugi/lipsync-001.json")
                     .unwrap(),
+                transform: Transform::default(),
                 extra: BTreeMap::new(),
             })],
         });
@@ -792,10 +987,16 @@ mod tests {
         let character = p.character_clips()[0];
         let bgm = p.bgm_clips()[0];
         let se = p.sound_effect_clips()[0];
+        let video = p.video_clips()[0];
+        let text = p.text_clips()[0];
         assert_eq!(image.id, "image-001");
         assert_eq!(character.speaker.as_deref(), Some("reimu"));
         assert_eq!(bgm.volume, 0.6);
         assert_eq!(se.duration_ms, 800);
+        assert_eq!(video.trim_start_ms, 250);
+        assert_eq!(video.transform.crop.unwrap().width, 0.8);
+        assert_eq!(text.text, "Title Card");
+        assert_eq!(text.color.as_deref(), Some("#ffcc00"));
 
         let by_id: BTreeMap<&str, &Clip> = p.clips().map(|c| (c.id(), c)).collect();
         let image = by_id["image-001"];
@@ -825,7 +1026,11 @@ mod tests {
         assert!(json.contains("\"type\": \"character\""));
         assert!(json.contains("\"type\": \"bgm\""));
         assert!(json.contains("\"type\": \"sound_effect\""));
+        assert!(json.contains("\"type\": \"video\""));
+        assert!(json.contains("\"type\": \"text\""));
         assert!(json.contains("\"kind\": \"bgm\""));
+        assert!(json.contains("\"kind\": \"video\""));
+        assert!(json.contains("\"kind\": \"text\""));
         assert!(json.contains("\"fit\": \"cover\""));
         assert!(json.contains("\"role\": \"primary_visual\""));
         let character_json = serde_json::to_string(&p.character_clips()[0]).unwrap();
@@ -856,6 +1061,7 @@ mod tests {
                 "assets/character/reimu/normal.png",
                 "assets/image/rust.png",
                 "assets/se/pop.wav",
+                "assets/video/clip.mp4",
             ]
         );
     }

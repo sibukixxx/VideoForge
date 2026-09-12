@@ -30,11 +30,17 @@ MVP v0.1 の **Core + CLI**（設計書 Phase 1〜6）と Tauri GUI MVP（Phase 
 | VideoProject IR（ms 基準、Workspace 相対パスのみ許可、未知フィールド保持、image / character / bgm / se clip + presentation） | ✅ |
 | VOICEVOX（audio_query → override → synthesis）、OS キャッシュ（engine version 込みの key）、concurrency、cancel | ✅ 実 VOICEVOX の統合テストは engine が居る時だけ実行（`docs/testing/voicevox-manual-e2e.md`、macOS 確認済） |
 | Timeline / SRT（directive → clip 配置を含む） | ✅ |
-| FFmpeg preview（背景 + 音声配置 + 字幕 + speaker 名 + fade） | ✅ command builder + filtergraph escaping はテスト済。実 FFmpeg の統合テストは ffmpeg が見つかった時だけ実行（`docs/testing/ffmpeg-path-escaping.md`） |
+| FFmpeg preview（背景 + 音声配置 + 字幕 + speaker 名 + fade + Image/Character立ち絵/Video合成 + crop/fit/rotation/opacity + fade/pan/zoom transition + on-screen Text）(P1-1/P1-2/P1-5) | ✅ command builder + filtergraph escaping はテスト済。実 FFmpeg の統合テストは ffmpeg が見つかった時だけ実行（`docs/testing/ffmpeg-path-escaping.md`）。P1 dogfood（`docs/testing/p1-dogfood-e2e.md`）で背景+立ち絵2体+image(zoom)+video合成を実 FFmpeg で確認し、overlay座標式の未エスケープによるパースエラーを発見・修正済み。slide は未検証 |
+| Audio Engine（Dialogue / BGM / SE を `amix` で合成、BGM の volume/loop/trim/fade-in-out/normalize、**Dialogue 発話区間での BGM ducking**）(P1-4) | ✅ command builder テスト済。Video clip 自身の音声トラックは未合成（次の課題） |
+| Subtitle Engine（`preview.subtitle`: position top/bottom・margin・font/outline color・outline width・background box・font_scale、話者別 `caption_color`、字幕と立ち絵の安全領域はどちらの edge でも共有）(P1-3) | ✅ command builder テスト済。P1 dogfoodで話者別色・背景ボックス・font_scaleを実 FFmpeg + 実CJKフォントで確認済み。`position: top` は未検証。行の折返しは固定文字数の hard-wrap（CJK 前提） |
+| Render Presets（`youtube-1080p` / `youtube-short` / `preview-low`: 解像度・fps・コーデック・画質・音声ビットレートの一括指定、`videoforge generate --preset`）(P1-6) | ✅ command builder テスト済。P1 dogfoodで `youtube-1080p`/`preview-low` の解像度反映を `ffprobe` で確認済み。ビットレート/画質の主観評価は未実施 |
+| Fast Preview（`--range-ms` による出力側 `-ss`/`-t` トリム、`videoforge preview fast` による既存 project.vfp.json からの再レンダリング — パース・検証・TTS・タイムライン構築を全省略）(P1-7) | ✅ command builder / CLI テスト済。P1 dogfoodで実 FFmpeg 実行を確認（45秒レンジ指定 → 実際に45.000秒の出力、フル生成4分25秒に対し27.5秒）。manifest.json への記録なし |
 | YMM4 exporter（Template Patch 方式、Windows path materialize、Windows 限定） | ✅ 合成 fixture でテスト済。**実 YMM4 template での Phase 0 検証は未実施** |
 | Handoff bundle（dir + zip） | ✅ |
 | Tauri GUI（`apps/desktop`: Workspace / Script / Validate / Generate + 進捗 / Preview / Doctor / YMM4 export or bundle） | ✅ MVP。実機での起動確認は `apps/desktop/README.md` のチェックリスト |
-| Character（VOICEVOX + Live2D）: 話者を character manifest にリンクし、名前ベースで VOICEVOX voice を解決、決定論的な lip-sync データを `character_performance` track として timeline に保持。`videoforge character inspect` / `validate` | ✅ P0（音声+lip-syncデータまで）。フレーム描画・preview.mp4 統合は未実装 — 詳細は `docs/character-system.md` |
+| Character（VOICEVOX + Live2D / 3-state PNG）: 話者を character manifest にリンクし、名前ベースで VOICEVOX voice を解決、決定論的な lip-sync データを `character_performance` track として timeline に保持。`model.type: png_lipsync` は closed/half/open の透過 PNG を実際に `preview.mp4` へ合成する（P0-1）。`videoforge character inspect` / `validate` | ✅ Live2D は音声+lip-syncデータまで（フレーム描画は未実装）。PNG は合成まで実装済み — 詳細は `docs/character-system.md` |
+| Asset Registry（P0-2）: 生成物が依存するファイルを識別・存在確認・SHA256 ハッシュ化し `generated/<slug>/asset-registry.json` に保存。`videoforge assets <project.vfp.json>` | ✅ 最小実装（巨大な DAM は作らない） |
+| Doctor（P0-3）: VOICEVOX / FFmpeg / 出力ディレクトリ書き込み可否 / 空きディスク容量 / 出力設定 / character identity→voice→asset 解決を生成前に確認 | ✅ |
 
 ## Quick start
 
@@ -67,6 +73,18 @@ videoforge export ymm4 sample-ymm4-bundle/project.vfp.json
 
 VOICEVOX / FFmpeg なしで配管だけ試す: `videoforge generate scripts/sample.md --fake-tts --no-preview`
 
+書き出しプリセット（P1-6）と高速プレビュー（P1-7）:
+
+```bash
+videoforge generate scripts/sample.md --preset youtube-1080p           # 1920x1080/30fps/crf18
+videoforge generate scripts/sample.md --preset preview-low --range-ms 0:15000   # 低解像度 + 範囲指定
+videoforge preview fast generated/sample/project.vfp.json --preset preview-low --range-ms 0:15000
+```
+
+`--preset` は `youtube-1080p` / `youtube-short` / `preview-low` の3種類（解像度・fps・コーデック・画質・音声ビットレートを一括指定）。
+`--range-ms START:END`（ミリ秒）を付けると `preview.fast.mp4` に出力され、増分ビルドキャッシュには参加しない。
+`videoforge preview fast <project.vfp.json>` は既存の生成結果からパース・検証・TTS・タイムライン構築を全てスキップして再レンダリングのみ行う。
+
 ## 台本フォーマット
 
 資料からAIで台本案を作る半自動P0は
@@ -95,7 +113,7 @@ template: yukkuri-tech
 directive は直後の台詞と一緒に始まり、素材は Workspace 相対パスで `assets/` 配下に置く。
 
 ```markdown
-@bgm assets/bgm/main.mp3[volume=0.6, loop=true]
+@bgm assets/bgm/main.mp3[volume=0.6, loop=true, fade_in_ms=500, fade_out_ms=800, trim_start_ms=0, normalize=true]
 
 @image assets/image/chart.png[role=diagram, duration_ms=3000]
 @character reimu[expression=happy]

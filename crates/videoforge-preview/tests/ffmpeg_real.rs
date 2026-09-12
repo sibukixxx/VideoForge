@@ -220,3 +220,77 @@ async fn preview_renders_from_a_workspace_with_special_characters() {
 fn serde_yaml_quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
+
+/// Regression test for a real bug found by dogfooding P1 (docs/testing/p1-dogfood-e2e.md):
+/// `overlay`'s `x=`/`y=` position expressions (`min(max(0,...),...)`, used by
+/// every character overlay and every general visual layer since P0-1/P1-1)
+/// contain a raw, unescaped `,` inside `min(max(...))`. FFmpeg's
+/// filter-option tokenizer splits an option's value on a bare `,` — it is
+/// not just a *decoration* separator, it ends the value — so the whole
+/// filtergraph failed to parse ("No option name near ...") the moment a
+/// project had more than a background and captions. No unit test caught
+/// this because every existing test only asserts on the generated *string*,
+/// never feeds it to a real FFmpeg. This test does, on the minimal
+/// multi-layer shape (one background + one character overlay) that
+/// triggers it.
+#[tokio::test]
+async fn overlay_position_expressions_parse_in_a_real_filtergraph() {
+    let Some(ffmpeg) = find_ffmpeg() else {
+        eprintln!("skipped: no ffmpeg (set VIDEOFORGE_FFMPEG or put ffmpeg on PATH)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("overlay-quoting");
+    init::init(&root, Some("overlay-quoting")).unwrap();
+    let ws = Workspace::open(&root).unwrap();
+
+    // Link a speaker to the repo's own synthetic png_lipsync fixture so the
+    // rendered graph gets a character overlay — the shape that triggers the
+    // bug (a background-only project's single-chain fast path never hits
+    // `overlay=`  at all).
+    let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/character/mock-png-character")
+        .canonicalize()
+        .unwrap();
+    let manifest_dst = root.join("characters.yaml");
+    std::fs::copy(fixture_root.join("manifest.yaml"), &manifest_dst).unwrap();
+    let sprites_dst = root.join("sprites");
+    std::fs::create_dir_all(&sprites_dst).unwrap();
+    for name in ["closed.png", "half.png", "open.png"] {
+        std::fs::copy(
+            fixture_root.join("sprites").join(name),
+            sprites_dst.join(name),
+        )
+        .unwrap();
+    }
+
+    let cfg_path = ws.config_path();
+    let mut cfg = std::fs::read_to_string(&cfg_path).unwrap();
+    cfg = cfg.replace(
+        "speakers:\n  reimu:\n    aliases:\n      - 霊夢\n",
+        "character_manifest: characters.yaml\nspeakers:\n  reimu:\n    aliases:\n      - 霊夢\n    character_id: mock_a\n",
+    );
+    assert!(
+        cfg.contains("character_id: mock_a"),
+        "unexpected default config layout"
+    );
+    std::fs::write(&cfg_path, cfg).unwrap();
+
+    let mut deps = GenerateDeps::new(Arc::new(FakeTtsEngine::default()));
+    deps.preview = Some(Arc::new(FfmpegPreviewRenderer::with_binary(ffmpeg)));
+    let out = generate(
+        &ws,
+        &ws.scripts_dir().join("sample.md"),
+        GenerateOptions {
+            preview: Some(true),
+            ..Default::default()
+        },
+        deps,
+    )
+    .await
+    .expect("generate with a character overlay and a real ffmpeg");
+
+    let preview = out.preview_path.expect("preview.mp4 must be rendered");
+    let size = std::fs::metadata(&preview).unwrap().len();
+    assert!(size > 1024, "preview.mp4 is only {size} bytes");
+}

@@ -353,14 +353,55 @@ pub struct GenerateArgs {
     pub srt_speaker: bool,
     pub no_cache: bool,
     pub keep_tmp: bool,
+    /// Render preset name (P1-6), e.g. `youtube-1080p`.
+    pub preset: Option<String>,
+    /// Fast preview range as `START:END` in milliseconds (P1-7), e.g. `0:15000`.
+    pub range_ms: Option<String>,
     pub fake_tts: bool,
     pub endpoint: Option<String>,
+}
+
+/// Parse a `--range-ms START:END` value into a `(start_ms, end_ms)` pair,
+/// rejecting a non-numeric, reversed, or empty range up front rather than
+/// letting FFmpeg fail on a nonsensical `-t`.
+pub fn parse_range_ms(raw: &str) -> anyhow::Result<(u64, u64)> {
+    let (start, end) = raw
+        .split_once(':')
+        .ok_or_else(|| anyhow!("--range-ms must look like START:END (got `{raw}`)"))?;
+    let start: u64 = start
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("--range-ms start `{start}` is not a whole number of milliseconds"))?;
+    let end: u64 = end
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("--range-ms end `{end}` is not a whole number of milliseconds"))?;
+    if end <= start {
+        return Err(anyhow!(
+            "--range-ms end ({end}) must be greater than start ({start})"
+        ));
+    }
+    Ok((start, end))
 }
 
 pub async fn generate(ctx: &Context, args: GenerateArgs) -> anyhow::Result<ExitCode> {
     let ws = ctx.workspace_for(Some(&args.script))?;
     let cfg = ws.load_config()?;
     let script = resolve_script(&ws, &args.script)?;
+
+    let render_preset = args
+        .preset
+        .as_deref()
+        .map(|name| {
+            videoforge_core::preset::find(name).ok_or_else(|| {
+                anyhow!(
+                    "unknown --preset `{name}` (known presets: {})",
+                    videoforge_core::preset::names().join(", ")
+                )
+            })
+        })
+        .transpose()?;
+    let preview_range_ms = args.range_ms.as_deref().map(parse_range_ms).transpose()?;
 
     let endpoint = args.endpoint.unwrap_or(cfg.tts.endpoint.clone());
     let tts = make_tts(
@@ -405,6 +446,9 @@ pub async fn generate(ctx: &Context, args: GenerateArgs) -> anyhow::Result<ExitC
             GenerationStage::WritingProject => eprintln!("→ Writing project.vfp.json"),
             GenerationStage::WritingCaptions => eprintln!("→ Writing captions.srt"),
             GenerationStage::RenderingPreview => eprintln!("→ Rendering preview.mp4 (ffmpeg)"),
+            GenerationStage::PreviewCacheHit => {
+                eprintln!("→ Reusing preview.mp4 (cached)")
+            }
             GenerationStage::PreviewSkipped { reason } => eprintln!("→ {reason}"),
             GenerationStage::Completed => eprintln!("→ Done"),
         }
@@ -432,6 +476,8 @@ pub async fn generate(ctx: &Context, args: GenerateArgs) -> anyhow::Result<ExitC
         srt_include_speaker: args.srt_speaker,
         cancel,
         keep_tmp_on_failure: args.keep_tmp,
+        render_preset,
+        preview_range_ms,
     };
     let out = core_generate::generate(&ws, &script, options, deps).await?;
 
@@ -475,6 +521,75 @@ pub async fn generate(ctx: &Context, args: GenerateArgs) -> anyhow::Result<ExitC
                 ws.relative(&out.project_path)
             );
         }
+    }
+    exit(0)
+}
+
+// ---------------------------------------------------------------- preview fast
+
+/// Fast preview (P1-7): re-render from an *already generated*
+/// `project.vfp.json`, skipping parse/validate/TTS/timeline entirely — see
+/// `videoforge_core::fastpreview`. `project_path` may be the project file
+/// itself or the `generated/<slug>/` directory containing it.
+pub async fn preview_fast(
+    ctx: &Context,
+    project_path: PathBuf,
+    range_ms: Option<String>,
+    preset: Option<String>,
+    out: Option<PathBuf>,
+) -> anyhow::Result<ExitCode> {
+    let project_path = if project_path.is_dir() {
+        project_path.join(core_generate::PROJECT_FILE)
+    } else {
+        project_path
+    };
+    let project_path = project_path
+        .canonicalize()
+        .with_context(|| format!("project not found: {}", project_path.display()))?;
+    let project_dir = project_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+    let project = VideoProject::load(&project_path)?;
+    let workspace = ctx.workspace_for(Some(&project_path))?;
+    let config = workspace.load_config()?;
+
+    let range_ms = range_ms.as_deref().map(parse_range_ms).transpose()?;
+    let render_preset = preset
+        .as_deref()
+        .map(|name| {
+            videoforge_core::preset::find(name).ok_or_else(|| {
+                anyhow!(
+                    "unknown --preset `{name}` (known presets: {})",
+                    videoforge_core::preset::names().join(", ")
+                )
+            })
+        })
+        .transpose()?;
+
+    let renderer = FfmpegPreviewRenderer::detect();
+    renderer.availability().map_err(anyhow::Error::from)?;
+    let output = out.unwrap_or_else(|| project_dir.join(core_generate::PREVIEW_FAST_FILE));
+
+    videoforge_core::fastpreview::render(videoforge_core::fastpreview::FastPreviewRequest {
+        project: &project,
+        project_dir: &project_dir,
+        config: &config,
+        workspace: &workspace,
+        renderer: &renderer,
+        output: &output,
+        range_ms,
+        preset: render_preset,
+    })
+    .await?;
+
+    if ctx.json {
+        ctx.emit_json(&serde_json::json!({
+            "ok": true,
+            "output": output,
+        }))?;
+    } else {
+        println!("Rendered {}", output.display());
     }
     exit(0)
 }
@@ -616,13 +731,32 @@ struct CharacterVoiceReport {
 }
 
 #[derive(Serialize)]
-struct CharacterModelReport {
-    #[serde(rename = "type")]
-    model_type: String,
+struct Live2dModelReport {
     path: String,
     resolved_path: PathBuf,
     expressions: Vec<String>,
     motions: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct PngLipsyncModelReport {
+    closed: PathBuf,
+    half: PathBuf,
+    open: PathBuf,
+    /// The three sprites don't share the same pixel dimensions — not an
+    /// error, but the character will visibly jump when the renderer swaps
+    /// mouth states.
+    dimensions_mismatched: bool,
+}
+
+#[derive(Serialize)]
+struct CharacterModelReport {
+    #[serde(rename = "type")]
+    model_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live2d: Option<Live2dModelReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    png_lipsync: Option<PngLipsyncModelReport>,
     error: Option<String>,
 }
 
@@ -696,32 +830,61 @@ async fn build_character_reports(
             None
         };
 
-        let model = if let Some(m) = &c.model {
-            let resolved_path = m.resolve_path(manifest_dir);
-            match videoforge_character::live2d::load_model3_json(&resolved_path) {
-                Ok(info) => Some(CharacterModelReport {
-                    model_type: m.model_type.clone(),
-                    path: m.path.clone(),
-                    resolved_path,
-                    expressions: info.expressions,
-                    motions: info.motions,
-                    error: None,
-                }),
-                Err(e) => {
-                    ok = false;
-                    Some(CharacterModelReport {
+        let model = c.model.as_ref().map(|m| {
+            if m.is_png_lipsync() {
+                match videoforge_character::png_lipsync::load_png_lipsync_assets(m, manifest_dir) {
+                    Ok(assets) => CharacterModelReport {
                         model_type: m.model_type.clone(),
-                        path: m.path.clone(),
-                        resolved_path,
-                        expressions: Vec::new(),
-                        motions: Vec::new(),
-                        error: Some(e.to_string()),
-                    })
+                        live2d: None,
+                        png_lipsync: Some(PngLipsyncModelReport {
+                            closed: m.resolve_closed(manifest_dir).unwrap_or_default(),
+                            half: m.resolve_half(manifest_dir).unwrap_or_default(),
+                            open: m.resolve_open(manifest_dir).unwrap_or_default(),
+                            dimensions_mismatched: assets.dimensions_mismatched(),
+                        }),
+                        error: None,
+                    },
+                    Err(e) => {
+                        ok = false;
+                        CharacterModelReport {
+                            model_type: m.model_type.clone(),
+                            live2d: None,
+                            png_lipsync: None,
+                            error: Some(e.to_string()),
+                        }
+                    }
+                }
+            } else {
+                let resolved_path = m.resolve_path(manifest_dir);
+                match videoforge_character::live2d::load_model3_json(&resolved_path) {
+                    Ok(info) => CharacterModelReport {
+                        model_type: m.model_type.clone(),
+                        live2d: Some(Live2dModelReport {
+                            path: m.path.clone().unwrap_or_default(),
+                            resolved_path,
+                            expressions: info.expressions,
+                            motions: info.motions,
+                        }),
+                        png_lipsync: None,
+                        error: None,
+                    },
+                    Err(e) => {
+                        ok = false;
+                        CharacterModelReport {
+                            model_type: m.model_type.clone(),
+                            live2d: Some(Live2dModelReport {
+                                path: m.path.clone().unwrap_or_default(),
+                                resolved_path,
+                                expressions: Vec::new(),
+                                motions: Vec::new(),
+                            }),
+                            png_lipsync: None,
+                            error: Some(e.to_string()),
+                        }
+                    }
                 }
             }
-        } else {
-            None
-        };
+        });
 
         out.push(CharacterEntryReport {
             id: c.id.clone(),
@@ -754,19 +917,28 @@ fn print_character_report(r: &CharacterEntryReport, checked: bool) {
         }
     }
     if let Some(m) = &r.model {
-        println!("  model: {} at {}", m.model_type, m.resolved_path.display());
-        match &m.error {
-            Some(e) => println!("    ! {e}"),
-            None => {
-                let list = |v: &[String]| {
-                    if v.is_empty() {
-                        "(none declared)".to_string()
-                    } else {
-                        v.join(", ")
-                    }
-                };
-                println!("    expressions: {}", list(&m.expressions));
-                println!("    motions:     {}", list(&m.motions));
+        println!("  model: {}", m.model_type);
+        if let Some(e) = &m.error {
+            println!("    ! {e}");
+        }
+        if let Some(l) = &m.live2d {
+            println!("    path: {}", l.resolved_path.display());
+            let list = |v: &[String]| {
+                if v.is_empty() {
+                    "(none declared)".to_string()
+                } else {
+                    v.join(", ")
+                }
+            };
+            println!("    expressions: {}", list(&l.expressions));
+            println!("    motions:     {}", list(&l.motions));
+        }
+        if let Some(p) = &m.png_lipsync {
+            println!("    closed: {}", p.closed.display());
+            println!("    half:   {}", p.half.display());
+            println!("    open:   {}", p.open.display());
+            if p.dimensions_mismatched {
+                println!("    ! closed/half/open sprites have different pixel dimensions (the character will jump when the mouth state changes)");
             }
         }
     }
@@ -831,4 +1003,93 @@ pub async fn character_validate(
         println!("{}", if ok { "OK" } else { "FAILED" });
     }
     exit(if ok { 0 } else { 2 })
+}
+
+// ------------------------------------------------------------------ assets
+
+/// Resolve a user-given path to the `asset-registry.json` it names or sits
+/// next to: the file itself, its directory, or `project.vfp.json` (or any
+/// other file) in that same generated output directory.
+fn resolve_registry_path(input: &Path) -> PathBuf {
+    if input.is_dir() {
+        return input.join(core_generate::ASSET_REGISTRY_FILE);
+    }
+    if input.file_name().and_then(|n| n.to_str()) == Some(core_generate::ASSET_REGISTRY_FILE) {
+        return input.to_path_buf();
+    }
+    input
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(core_generate::ASSET_REGISTRY_FILE)
+}
+
+pub fn assets(ctx: &Context, project: PathBuf) -> anyhow::Result<ExitCode> {
+    let registry_path = resolve_registry_path(&project);
+    let registry = videoforge_core::assets::AssetRegistry::load(&registry_path)
+        .with_context(|| format!("asset registry: {}", registry_path.display()))?;
+    let missing = registry.missing();
+    let ok = missing.is_empty();
+
+    if ctx.json {
+        ctx.emit_json(&serde_json::json!({
+            "ok": ok,
+            "registry": registry_path,
+            "assets": registry.assets,
+        }))?;
+    } else {
+        println!("Asset registry: {}", registry_path.display());
+        for a in &registry.assets {
+            let mark = if a.exists() { "✓" } else { "✗" };
+            println!();
+            println!("{mark} {} ({:?})", a.id, a.kind);
+            println!(
+                "  provenance: {}  license: {}",
+                a.provenance, a.license_status
+            );
+            for f in &a.files {
+                let file_mark = if f.exists { "✓" } else { "✗" };
+                let hash = f.hash.as_deref().unwrap_or("-");
+                println!("  {file_mark} {}: {} ({hash})", f.role, f.path);
+            }
+        }
+        println!();
+        if ok {
+            println!("OK — {} asset(s), all present", registry.assets.len());
+        } else {
+            println!(
+                "FAILED — {} of {} asset(s) missing a file",
+                missing.len(),
+                registry.assets.len()
+            );
+        }
+    }
+    exit(if ok { 0 } else { 2 })
+}
+
+#[cfg(test)]
+mod range_ms_tests {
+    use super::parse_range_ms;
+
+    #[test]
+    fn parses_a_valid_range() {
+        assert_eq!(parse_range_ms("0:5000").unwrap(), (0, 5000));
+        assert_eq!(parse_range_ms(" 100 : 200 ").unwrap(), (100, 200));
+    }
+
+    #[test]
+    fn rejects_a_missing_colon() {
+        assert!(parse_range_ms("5000").is_err());
+    }
+
+    #[test]
+    fn rejects_non_numeric_bounds() {
+        assert!(parse_range_ms("start:end").is_err());
+        assert!(parse_range_ms("0:end").is_err());
+    }
+
+    #[test]
+    fn rejects_end_not_after_start() {
+        assert!(parse_range_ms("5000:5000").is_err());
+        assert!(parse_range_ms("5000:1000").is_err());
+    }
 }

@@ -59,7 +59,12 @@ pub const PROJECT_FILE: &str = "project.vfp.json";
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const CAPTIONS_FILE: &str = "captions.srt";
 pub const PREVIEW_FILE: &str = "preview.mp4";
+/// Output filename for a range-limited fast preview (P1-7) — distinct from
+/// [`PREVIEW_FILE`] so it is never promoted in place of the canonical
+/// preview, and a stale one left over from an old generate is harmless.
+pub const PREVIEW_FAST_FILE: &str = "preview.fast.mp4";
 pub const SOURCE_FILE: &str = "source.md";
+pub const ASSET_REGISTRY_FILE: &str = "asset-registry.json";
 
 #[derive(Clone)]
 pub struct GenerateOptions {
@@ -69,6 +74,19 @@ pub struct GenerateOptions {
     pub cancel: CancellationToken,
     /// Keep the temp directory when generation fails (debugging).
     pub keep_tmp_on_failure: bool,
+    /// Render preset (P1-6): overrides `project.video`'s width/height/fps
+    /// and the preview renderer's codec/quality/audio-bitrate settings.
+    /// `None` keeps today's behavior (config-driven resolution, the
+    /// renderer's default encode settings).
+    pub render_preset: Option<&'static crate::preset::RenderPreset>,
+    /// Fast preview (P1-7): render only `[start_ms, end_ms)` of the
+    /// timeline via an output-side trim, and write it to
+    /// [`PREVIEW_FAST_FILE`] instead of [`PREVIEW_FILE`] so it can never
+    /// replace the canonical preview — a ranged render also bypasses the
+    /// P0-4 incremental-build cache entirely (it is a one-off exploratory
+    /// render, not "the" preview this project caches). `None` renders the
+    /// whole timeline to `PREVIEW_FILE` as before.
+    pub preview_range_ms: Option<(u64, u64)>,
 }
 
 impl Default for GenerateOptions {
@@ -78,6 +96,8 @@ impl Default for GenerateOptions {
             srt_include_speaker: false,
             cancel: CancellationToken::new(),
             keep_tmp_on_failure: false,
+            render_preset: None,
+            preview_range_ms: None,
         }
     }
 }
@@ -166,7 +186,10 @@ pub async fn generate(
             Ok(GeneratedProject {
                 slug,
                 project_path: output_dir.join(PROJECT_FILE),
-                preview_path: preview_path.map(|_| output_dir.join(PREVIEW_FILE)),
+                preview_path: preview_path
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .map(|f| output_dir.join(f)),
                 output_dir,
                 project,
                 manifest,
@@ -250,6 +273,10 @@ async fn run_pipeline(
             text: s.text.clone(),
             audio: rel,
             duration_ms: s.duration_ms,
+            caption_color: config
+                .speakers
+                .get(&s.speaker_key)
+                .and_then(|sc| sc.caption_color.clone()),
         });
     }
 
@@ -260,7 +287,17 @@ async fn run_pipeline(
     // `character_performance` track is emitted at all.
     let character_manifest = crate::character::load_manifest(config, workspace)?;
     let mut character_performance = Vec::new();
+    // Absolute PNG sprite paths for every `png_lipsync` character that
+    // performs in this project, keyed by character id — passed to the
+    // preview renderer below exactly like `preview.font`: never copied into
+    // `generated/`, resolved fresh from the (separate, reusable) character
+    // manifest every run.
+    let mut character_sprites: std::collections::BTreeMap<
+        String,
+        crate::preview::CharacterSpriteSet,
+    > = std::collections::BTreeMap::new();
     if let Some(loaded) = &character_manifest {
+        let manifest_dir = loaded.path.parent().unwrap_or_else(|| Path::new("."));
         let by_index: std::collections::HashMap<usize, &validate::ResolvedDialogue> =
             report.dialogues.iter().map(|d| (d.index, d)).collect();
         for s in &synthesized {
@@ -291,6 +328,15 @@ async fn run_pipeline(
                 .map_err(|e| AppError::serialization("lipsync", e))?;
             std::fs::write(&path, json).map_err(|e| AppError::write(&path, e))?;
             let rel = RelativeAssetPath::new(format!("assets/character/{character_id}/{file}"))?;
+            if let Some(sprites) = crate::character::resolve_png_sprites(character, manifest_dir)? {
+                character_sprites
+                    .entry(character_id.clone())
+                    .or_insert_with(|| crate::preview::CharacterSpriteSet {
+                        closed: sprites.closed,
+                        half: sprites.half,
+                        open: sprites.open,
+                    });
+            }
             character_performance.push(CharacterPerformanceInput {
                 index: s.index,
                 character: character_id.clone(),
@@ -303,6 +349,7 @@ async fn run_pipeline(
                     .clone()
                     .unwrap_or_else(|| "idle".to_string()),
                 lip_sync: rel,
+                transform: crate::character::presentation_transform(character),
             });
         }
     }
@@ -328,7 +375,7 @@ async fn run_pipeline(
         None => None,
     };
 
-    // --- Directive assets (image / character / bgm / se) -----------------
+    // --- Directive assets (image / character / bgm / se / video) ---------
     // Copied under the same workspace-relative path so the project's asset
     // paths are valid both in the workspace and in generated/<slug>/.
     // Missing assets were already reported as warnings by validation.
@@ -352,7 +399,7 @@ async fn run_pipeline(
     }
     progress.on_stage(&GenerationStage::BuildingTimeline);
     let source_rel = workspace.relative(script_path);
-    let project = videoforge_timeline::build(TimelineInput {
+    let mut project = videoforge_timeline::build(TimelineInput {
         id: report.slug.clone(),
         title: report.title.clone(),
         video: config.video.into(),
@@ -369,6 +416,17 @@ async fn run_pipeline(
             dialogue_gap_ms: config.timeline.dialogue_gap_ms,
         },
     })?;
+    // Render preset (P1-6): safe to override post-hoc because every clip's
+    // `Transform` position is a normalized `0.0..=1.0` fraction, never a
+    // pixel value, so changing width/height/fps here never touches
+    // placement math — `project.vfp.json` then correctly records the
+    // resolution this generate actually rendered at.
+    if let Some(preset) = options.render_preset {
+        project.video.width = preset.width;
+        project.video.height = preset.height;
+        project.video.fps = preset.fps;
+    }
+    let encode = options.render_preset.map(|p| p.encode).unwrap_or_default();
 
     // --- Project IR + captions + source copy -----------------------------
     progress.on_stage(&GenerationStage::WritingProject);
@@ -397,24 +455,71 @@ async fn run_pipeline(
         match &deps.preview {
             Some(renderer) => match renderer.availability() {
                 Ok(_) => {
-                    progress.on_stage(&GenerationStage::RenderingPreview);
-                    let output = tmp_dir.join(PREVIEW_FILE);
+                    // A range-limited fast preview (P1-7) is a disposable,
+                    // exploratory render: it writes to its own filename and
+                    // never participates in the P0-4 incremental-build
+                    // cache, so it can never mask or be masked by a
+                    // full-timeline `preview.mp4`.
+                    let is_fast = options.preview_range_ms.is_some();
+                    let output = tmp_dir.join(if is_fast {
+                        PREVIEW_FAST_FILE
+                    } else {
+                        PREVIEW_FILE
+                    });
                     let font = config
                         .preview
                         .font
                         .as_deref()
                         .and_then(|f| workspace.resolve_allow_absolute(f).ok())
                         .filter(|p| p.is_file());
-                    renderer
-                        .render(PreviewRequest {
-                            project: &project,
-                            project_dir: tmp_dir,
-                            output: &output,
-                            font: font.as_deref(),
-                            background_color: &config.preview.background_color,
-                            cancel: cancel.clone(),
-                        })
-                        .await?;
+                    let project_json = project.to_json()?;
+                    let fingerprint = crate::buildcache::preview_fingerprint(
+                        &project_json,
+                        font.as_deref(),
+                        &config.preview.background_color,
+                        &config.preview.subtitle,
+                        &encode,
+                        renderer.id(),
+                    );
+                    // P0-4: reuse the previous generate's preview.mp4 when
+                    // every input that affects it is byte-for-byte
+                    // unchanged, instead of re-invoking FFmpeg.
+                    let previous_dir = workspace.generated_dir().join(&report.slug);
+                    let previous_preview = previous_dir.join(PREVIEW_FILE);
+                    let previous_fingerprint_path =
+                        previous_dir.join(crate::buildcache::PREVIEW_FINGERPRINT_FILE);
+                    let cache_hit = !is_fast
+                        && previous_preview.is_file()
+                        && std::fs::read_to_string(&previous_fingerprint_path)
+                            .map(|s| s == fingerprint)
+                            .unwrap_or(false);
+                    if cache_hit {
+                        std::fs::copy(&previous_preview, &output)
+                            .map_err(|e| AppError::write(&output, e))?;
+                        progress.on_stage(&GenerationStage::PreviewCacheHit);
+                    } else {
+                        progress.on_stage(&GenerationStage::RenderingPreview);
+                        renderer
+                            .render(PreviewRequest {
+                                project: &project,
+                                project_dir: tmp_dir,
+                                output: &output,
+                                font: font.as_deref(),
+                                background_color: &config.preview.background_color,
+                                subtitle: &config.preview.subtitle,
+                                encode: &encode,
+                                range_ms: options.preview_range_ms,
+                                character_sprites: &character_sprites,
+                                cancel: cancel.clone(),
+                            })
+                            .await?;
+                    }
+                    if !is_fast {
+                        let fingerprint_path =
+                            tmp_dir.join(crate::buildcache::PREVIEW_FINGERPRINT_FILE);
+                        std::fs::write(&fingerprint_path, &fingerprint)
+                            .map_err(|e| AppError::write(&fingerprint_path, e))?;
+                    }
                     preview_path = Some(output);
                 }
                 Err(e) => {
@@ -441,7 +546,10 @@ async fn run_pipeline(
         generator_version: GENERATOR_VERSION.to_string(),
         source: source_rel,
         project: PROJECT_FILE.to_string(),
-        preview: preview_path.as_ref().map(|_| PREVIEW_FILE.to_string()),
+        preview: preview_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|f| f.to_string_lossy().into_owned()),
         captions: CAPTIONS_FILE.to_string(),
         audio: audio_files,
         generated_at: chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -451,6 +559,16 @@ async fn run_pipeline(
         warnings: warnings.clone(),
     };
     manifest.save(&tmp_dir.join(MANIFEST_FILE))?;
+
+    // --- Asset registry (P0-2) --------------------------------------------
+    let character_manifest_ref = character_manifest.as_ref().map(|loaded| {
+        (
+            &loaded.manifest,
+            loaded.path.parent().unwrap_or_else(|| Path::new(".")),
+        )
+    });
+    let registry = crate::assets::build_registry(&project, tmp_dir, character_manifest_ref);
+    registry.save(&tmp_dir.join(ASSET_REGISTRY_FILE))?;
 
     Ok((project, manifest, preview_path))
 }
@@ -540,6 +658,90 @@ mod tests {
     use super::*;
     use crate::init;
     use crate::tts::FakeTtsEngine;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Records how many times `render()` actually ran, and writes
+    /// deterministic (but distinguishable per call) bytes so a test can
+    /// tell a fresh render apart from a copied/cached one.
+    struct CountingPreviewRenderer {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl PreviewRenderer for CountingPreviewRenderer {
+        fn id(&self) -> &'static str {
+            "counting-fake"
+        }
+        fn availability(&self) -> Result<String, AppError> {
+            Ok("fake".into())
+        }
+        async fn render(&self, request: PreviewRequest<'_>) -> Result<(), AppError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            std::fs::write(request.output, format!("render #{n}"))
+                .map_err(|e| AppError::write(request.output, e))
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_render_is_skipped_when_nothing_that_affects_it_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        init::init(dir.path(), Some("t")).unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let script = ws.scripts_dir().join("sample.md");
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let make_deps = || {
+            let mut deps = GenerateDeps::new(Arc::new(FakeTtsEngine::default()));
+            deps.preview = Some(Arc::new(CountingPreviewRenderer {
+                calls: Arc::clone(&calls),
+            }));
+            deps
+        };
+
+        let first = generate(&ws, &script, GenerateOptions::default(), make_deps())
+            .await
+            .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "first generate must render"
+        );
+        let first_bytes = std::fs::read(first.preview_path.unwrap()).unwrap();
+
+        // Regenerate from the exact same script/config: nothing that
+        // affects the preview changed, so the cache must be hit.
+        let second = generate(&ws, &script, GenerateOptions::default(), make_deps())
+            .await
+            .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "unchanged inputs must not re-render"
+        );
+        let second_bytes = std::fs::read(second.preview_path.unwrap()).unwrap();
+        assert_eq!(
+            first_bytes, second_bytes,
+            "the cached preview.mp4 bytes must be reused verbatim"
+        );
+
+        // Changing a preview-affecting setting (background color) must
+        // invalidate the cache and re-render.
+        std::fs::write(
+            ws.root().join("videoforge.yaml"),
+            std::fs::read_to_string(ws.root().join("videoforge.yaml"))
+                .unwrap()
+                .replace("#1e1e2e", "#ffffff"),
+        )
+        .unwrap();
+        generate(&ws, &script, GenerateOptions::default(), make_deps())
+            .await
+            .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a changed background color must invalidate the cache"
+        );
+    }
 
     #[tokio::test]
     async fn end_to_end_with_fake_tts() {
@@ -555,12 +757,29 @@ mod tests {
 
         assert_eq!(out.slug, "sample");
         assert_eq!(out.output_dir, ws.generated_dir().join("sample"));
-        for f in [PROJECT_FILE, MANIFEST_FILE, CAPTIONS_FILE, SOURCE_FILE] {
+        for f in [
+            PROJECT_FILE,
+            MANIFEST_FILE,
+            CAPTIONS_FILE,
+            SOURCE_FILE,
+            ASSET_REGISTRY_FILE,
+        ] {
             assert!(out.output_dir.join(f).is_file(), "{f}");
         }
         assert!(out.output_dir.join("assets/audio/001.wav").is_file());
         assert!(out.output_dir.join("assets/audio/003.wav").is_file());
         assert!(!ws.tmp_dir().exists(), "temp dir cleaned up");
+
+        let registry =
+            crate::assets::AssetRegistry::load(&out.output_dir.join(ASSET_REGISTRY_FILE)).unwrap();
+        assert_eq!(
+            registry.missing(),
+            Vec::<&crate::assets::AssetRecord>::new()
+        );
+        assert!(registry
+            .assets
+            .iter()
+            .any(|a| a.kind == crate::assets::AssetKind::Audio));
 
         let project = VideoProject::load(&out.project_path).unwrap();
         assert_eq!(project.audio_clips().len(), 3);
@@ -646,6 +865,89 @@ mod tests {
         let track: crate::lipsync::LipSyncTrack =
             serde_json::from_str(&std::fs::read_to_string(&lipsync_path).unwrap()).unwrap();
         assert!(!track.samples.is_empty());
+    }
+
+    /// P0-1 acceptance shape: two speakers, each linked to a `png_lipsync`
+    /// character, in one script. `preview.mp4` compositing itself is tested
+    /// in `videoforge-preview` (offline, at the FFmpeg-command level); this
+    /// proves the pipeline up to `project.vfp.json` produces exactly the
+    /// per-character data (transform + sprite resolution) that renderer
+    /// needs: A's performance clip only where A speaks, B's only where B
+    /// speaks, both with a resolved `png_lipsync` sprite set.
+    #[tokio::test]
+    async fn end_to_end_with_two_png_lipsync_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        init::init(dir.path(), Some("t")).unwrap();
+
+        let fixture = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/character/mock-png-character"
+        ));
+        let dest_sprites = dir.path().join("characters/sprites");
+        std::fs::create_dir_all(&dest_sprites).unwrap();
+        std::fs::copy(
+            fixture.join("manifest.yaml"),
+            dir.path().join("characters/manifest.yaml"),
+        )
+        .unwrap();
+        for name in ["closed.png", "half.png", "open.png"] {
+            std::fs::copy(fixture.join("sprites").join(name), dest_sprites.join(name)).unwrap();
+        }
+        std::fs::write(
+            dir.path().join("videoforge.yaml"),
+            "character_manifest: characters/manifest.yaml\nspeakers:\n  mock_a:\n    character_id: mock_a\n  mock_b:\n    character_id: mock_b\n",
+        )
+        .unwrap();
+
+        let ws = Workspace::open(dir.path()).unwrap();
+        let script = ws.scripts_dir().join("dialogue.md");
+        std::fs::write(
+            &script,
+            "mock_a:\nAが話しています。\n\nmock_b:\nBが話しています。\n",
+        )
+        .unwrap();
+
+        let deps = GenerateDeps::new(Arc::new(FakeTtsEngine::default()));
+        let out = generate(&ws, &script, GenerateOptions::default(), deps)
+            .await
+            .unwrap();
+
+        let project = VideoProject::load(&out.project_path).unwrap();
+        let perf = project.character_performance_clips();
+        assert_eq!(perf.len(), 2);
+        assert_eq!(perf[0].character, "mock_a");
+        assert_eq!(perf[1].character, "mock_b");
+        // left/right placement resolved from the manifest's presentation,
+        // not a shared default — this is what lets a renderer draw both
+        // characters on screen at once without one covering the other.
+        assert_ne!(perf[0].transform.x, perf[1].transform.x);
+        assert_eq!(
+            perf[0].transform.x,
+            crate::character::CHARACTER_POSITION_X_LEFT
+        );
+        assert_eq!(
+            perf[1].transform.x,
+            crate::character::CHARACTER_POSITION_X_RIGHT
+        );
+        // A's clip covers only A's dialogue span, not B's — so a renderer
+        // that shows "closed" outside a character's own clips will draw B
+        // as closed while A speaks, and vice versa (P0-1 acceptance).
+        assert!(perf[0].start_ms + perf[0].duration_ms <= perf[1].start_ms);
+
+        // The asset registry (P0-2) has one entry per character, each with
+        // its three sprite files present and hashed.
+        let registry =
+            crate::assets::AssetRegistry::load(&out.output_dir.join(ASSET_REGISTRY_FILE)).unwrap();
+        let character_entries: Vec<_> = registry
+            .assets
+            .iter()
+            .filter(|a| a.kind == crate::assets::AssetKind::Character)
+            .collect();
+        assert_eq!(character_entries.len(), 2);
+        for entry in &character_entries {
+            assert_eq!(entry.files.len(), 3);
+            assert!(entry.exists(), "{entry:?}");
+        }
     }
 
     /// `generated/<slug>.old-*` directories still on disk.

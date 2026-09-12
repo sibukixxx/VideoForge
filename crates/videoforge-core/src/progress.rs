@@ -18,6 +18,10 @@ pub enum GenerationStage {
     WritingProject,
     WritingCaptions,
     RenderingPreview,
+    /// P0-4: the previous `preview.mp4` was reused because every input that
+    /// affects it (project IR, font bytes, background color, renderer
+    /// identity) is unchanged since the last successful generate.
+    PreviewCacheHit,
     PreviewSkipped {
         reason: String,
     },

@@ -79,10 +79,177 @@ pub fn analyze_amplitude(wav_bytes: &[u8], interval_ms: u32) -> Result<LipSyncTr
     })
 }
 
+/// Discrete mouth pose a 3-state PNG character renderer swaps between
+/// (P0-1, `docs/character-system.md`). Deliberately just three states,
+/// matching the `closed`/`half`/`open` sprites a `png_lipsync` character
+/// manifest declares — not a continuous blend, which would need more than a
+/// PNG swap to render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouthState {
+    Closed,
+    Half,
+    Open,
+}
+
+/// `mouth_open` thresholds mapping the continuous amplitude curve
+/// (`analyze_amplitude`) onto the three discrete sprite states. Hard-coded
+/// for P0 but named constants (not inline literals) so a future
+/// `videoforge.yaml`/character-manifest setting can override them without
+/// hunting through the renderer for magic numbers.
+pub const MOUTH_HALF_THRESHOLD: f32 = 0.15;
+pub const MOUTH_OPEN_THRESHOLD: f32 = 0.45;
+
+/// Map one amplitude sample to a discrete mouth state.
+pub fn mouth_state(mouth_open: f32) -> MouthState {
+    if mouth_open >= MOUTH_OPEN_THRESHOLD {
+        MouthState::Open
+    } else if mouth_open >= MOUTH_HALF_THRESHOLD {
+        MouthState::Half
+    } else {
+        MouthState::Closed
+    }
+}
+
+/// A run of consecutive samples in the same non-`Closed` mouth state, in
+/// absolute timeline milliseconds (`clip_start_ms`-relative samples shifted
+/// onto the dialogue's scheduled position). `Closed` runs are not emitted —
+/// a renderer's base layer is closed by default (design: an inactive
+/// speaker's default pose), so only the "cover it with a different sprite"
+/// windows are meaningful output.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MouthSegment {
+    pub state: MouthState,
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+/// Turn one dialogue's lip-sync curve into merged `Half`/`Open` segments
+/// placed at the clip's scheduled position on the timeline. Each sample
+/// covers `[t_ms, t_ms + interval_ms)` except the last, which is clipped to
+/// `clip_duration_ms` (a WAV's tail is rarely an exact multiple of
+/// `interval_ms`). Pure and deterministic, like `analyze_amplitude` itself —
+/// same curve in, same segments out — so a renderer's FFmpeg command is
+/// reproducible from the same generated output (design: incremental build).
+pub fn mouth_segments(
+    track: &LipSyncTrack,
+    clip_start_ms: u64,
+    clip_duration_ms: u64,
+) -> Vec<MouthSegment> {
+    let mut segments: Vec<MouthSegment> = Vec::new();
+    for sample in &track.samples {
+        let state = mouth_state(sample.mouth_open);
+        let rel_start = sample.t_ms as u64;
+        let rel_end = (rel_start + track.interval_ms as u64).min(clip_duration_ms);
+        if rel_start >= clip_duration_ms || rel_end <= rel_start {
+            continue;
+        }
+        let (start_ms, end_ms) = (clip_start_ms + rel_start, clip_start_ms + rel_end);
+        if state == MouthState::Closed {
+            continue;
+        }
+        match segments.last_mut() {
+            Some(last) if last.state == state && last.end_ms == start_ms => {
+                last.end_ms = end_ms;
+            }
+            _ => segments.push(MouthSegment {
+                state,
+                start_ms,
+                end_ms,
+            }),
+        }
+    }
+    segments
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::wav::silent_wav;
+
+    fn track(samples: &[(u32, f32)], interval_ms: u32) -> LipSyncTrack {
+        LipSyncTrack {
+            interval_ms,
+            samples: samples
+                .iter()
+                .map(|&(t_ms, mouth_open)| LipSyncSample { t_ms, mouth_open })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn mouth_state_thresholds() {
+        assert_eq!(mouth_state(0.0), MouthState::Closed);
+        assert_eq!(mouth_state(MOUTH_HALF_THRESHOLD - 0.01), MouthState::Closed);
+        assert_eq!(mouth_state(MOUTH_HALF_THRESHOLD), MouthState::Half);
+        assert_eq!(mouth_state(MOUTH_OPEN_THRESHOLD - 0.01), MouthState::Half);
+        assert_eq!(mouth_state(MOUTH_OPEN_THRESHOLD), MouthState::Open);
+        assert_eq!(mouth_state(1.0), MouthState::Open);
+    }
+
+    #[test]
+    fn mouth_segments_merges_consecutive_same_state_samples() {
+        let t = track(
+            &[
+                (0, 0.0),    // closed
+                (50, 0.2),   // half
+                (100, 0.25), // half (merges with previous)
+                (150, 0.9),  // open
+                (200, 0.0),  // closed
+            ],
+            50,
+        );
+        let segs = mouth_segments(&t, 1000, 250);
+        assert_eq!(
+            segs,
+            vec![
+                MouthSegment {
+                    state: MouthState::Half,
+                    start_ms: 1050,
+                    end_ms: 1150
+                },
+                MouthSegment {
+                    state: MouthState::Open,
+                    start_ms: 1150,
+                    end_ms: 1200
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn mouth_segments_is_empty_for_all_silence() {
+        let t = track(&[(0, 0.0), (50, 0.0)], 50);
+        assert!(mouth_segments(&t, 0, 100).is_empty());
+    }
+
+    #[test]
+    fn mouth_segments_clips_the_last_sample_to_clip_duration() {
+        // clip is only 30ms long even though the sample interval is 50ms.
+        let t = track(&[(0, 0.9)], 50);
+        let segs = mouth_segments(&t, 500, 30);
+        assert_eq!(
+            segs,
+            vec![MouthSegment {
+                state: MouthState::Open,
+                start_ms: 500,
+                end_ms: 530
+            }]
+        );
+    }
+
+    #[test]
+    fn mouth_segments_drops_samples_past_clip_duration() {
+        let t = track(&[(0, 0.9), (50, 0.9)], 50);
+        let segs = mouth_segments(&t, 0, 50);
+        assert_eq!(
+            segs,
+            vec![MouthSegment {
+                state: MouthState::Open,
+                start_ms: 0,
+                end_ms: 50
+            }]
+        );
+    }
 
     #[test]
     fn silence_is_all_closed_mouth() {

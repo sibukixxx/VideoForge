@@ -124,6 +124,9 @@ fn decode_dialogues(dialogues: Vec<DialogueRequest>) -> Result<Vec<DialogueInput
                 text: dialogue.text,
                 audio,
                 duration_ms: dialogue.duration_ms,
+                // Per-speaker caption color (P1-3) is a `videoforge.yaml`
+                // config concept the JS bridge does not expose yet.
+                caption_color: None,
             })
         })
         .collect()

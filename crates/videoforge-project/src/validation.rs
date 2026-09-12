@@ -223,6 +223,8 @@ fn clip_kind(clip: &Clip) -> TrackKind {
         Clip::Bgm(_) => TrackKind::Bgm,
         Clip::SoundEffect(_) => TrackKind::SoundEffect,
         Clip::CharacterPerformance(_) => TrackKind::CharacterPerformance,
+        Clip::Video(_) => TrackKind::Video,
+        Clip::Text(_) => TrackKind::Text,
     }
 }
 
@@ -236,6 +238,8 @@ fn kind_name(kind: TrackKind) -> &'static str {
         TrackKind::SoundEffect => "sound_effect",
         TrackKind::Bgm => "bgm",
         TrackKind::CharacterPerformance => "character_performance",
+        TrackKind::Video => "video",
+        TrackKind::Text => "text",
     }
 }
 
@@ -273,6 +277,7 @@ mod tests {
                     duration_ms: 1000,
                     speaker: "reimu".into(),
                     speaker_display: Some("霊夢".into()),
+                    color: None,
                     extra: BTreeMap::new(),
                 })],
             },
@@ -299,6 +304,7 @@ mod tests {
                 expression: "default".into(),
                 motion: "idle".into(),
                 lip_sync: RelativeAssetPath::new("assets/lipsync/001.json").unwrap(),
+                transform: crate::project::Transform::default(),
                 extra: BTreeMap::new(),
             })],
         });
@@ -319,6 +325,7 @@ mod tests {
             duration_ms: 1,
             speaker: "marisa".into(),
             speaker_display: None,
+            color: None,
             extra: BTreeMap::new(),
         });
 

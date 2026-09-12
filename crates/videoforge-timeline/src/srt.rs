@@ -45,6 +45,7 @@ mod tests {
                     duration_ms: 3410,
                     speaker: "reimu".into(),
                     speaker_display: Some("霊夢".into()),
+                    color: None,
                     extra: BTreeMap::new(),
                 }),
                 Clip::Caption(CaptionClip {
@@ -54,6 +55,7 @@ mod tests {
                     duration_ms: 3680,
                     speaker: "marisa".into(),
                     speaker_display: None,
+                    color: None,
                     extra: BTreeMap::new(),
                 }),
             ],

@@ -8,14 +8,79 @@
 //! `VoiceParams::speaker_id` it always has, so a workspace that never sets
 //! `character_id` is completely unaffected by this feature existing.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use videoforge_character::CharacterManifest;
+use videoforge_character::{Character, CharacterManifest, CharacterPosition};
+use videoforge_project::Transform;
 
 use crate::config::Config;
 use crate::error::AppError;
 use crate::tts::{Speaker, TtsEngine};
 use crate::workspace::Workspace;
+
+// Horizontal slot a `png_lipsync` character's `presentation.position` maps
+// onto, in the same normalized-centre coordinate system every other visual
+// clip's `Transform` already uses (`videoforge_project::Transform`). Hard-
+// coded for P0 (design: "thresholdはhard-codeする場合でも定数化する") —
+// chosen so two characters at `left`/`right` sit clear of both the frame
+// edge and each other.
+pub const CHARACTER_POSITION_X_LEFT: f32 = 0.20;
+pub const CHARACTER_POSITION_X_CENTER: f32 = 0.5;
+pub const CHARACTER_POSITION_X_RIGHT: f32 = 0.80;
+/// Default vertical centre for a character sprite: low enough to read as
+/// "standing", clamped further at render time (`videoforge-preview`) to
+/// never overlap the caption safe area.
+pub const CHARACTER_POSITION_Y: f32 = 0.80;
+
+/// Map a character's declared `presentation` (or its default, when unset)
+/// onto the one placement concept every visual clip already uses. This is
+/// the *only* place that interprets `CharacterPosition`; both
+/// `core::generate` (writing `project.vfp.json`) and any future consumer of
+/// the project IR see a plain `Transform`, not the character crate's enum.
+pub fn presentation_transform(character: &Character) -> Transform {
+    let presentation = character.presentation.unwrap_or_default();
+    let x = match presentation.position {
+        CharacterPosition::Left => CHARACTER_POSITION_X_LEFT,
+        CharacterPosition::Center => CHARACTER_POSITION_X_CENTER,
+        CharacterPosition::Right => CHARACTER_POSITION_X_RIGHT,
+    };
+    Transform {
+        x,
+        y: CHARACTER_POSITION_Y,
+        scale: presentation.scale,
+        ..Transform::default()
+    }
+}
+
+/// Absolute, resolved paths to a `png_lipsync` character's three sprites —
+/// resolved the same way as a Live2D `model.path` (design §6: outside the
+/// project IR, outside the workspace, never copied into `generated/`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPngSprites {
+    pub closed: PathBuf,
+    pub half: PathBuf,
+    pub open: PathBuf,
+}
+
+/// Resolve a character's PNG sprites, if it has a `png_lipsync` model.
+/// `Ok(None)` for a voice-only character, a Live2D character (frame
+/// rendering is still Phase 1), or a character with no model at all.
+pub fn resolve_png_sprites(
+    character: &Character,
+    manifest_dir: &Path,
+) -> Result<Option<ResolvedPngSprites>, AppError> {
+    let Some(model) = &character.model else {
+        return Ok(None);
+    };
+    if !model.is_png_lipsync() {
+        return Ok(None);
+    }
+    Ok(Some(ResolvedPngSprites {
+        closed: model.resolve_closed(manifest_dir)?,
+        half: model.resolve_half(manifest_dir)?,
+        open: model.resolve_open(manifest_dir)?,
+    }))
+}
 
 /// A loaded character manifest plus the path it was loaded from, so callers
 /// that need to resolve a character's (possibly relative) model path know
@@ -214,5 +279,75 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), "character_not_found");
+    }
+
+    fn png_character(position: Option<&str>, scale: Option<f32>) -> Character {
+        use videoforge_character::{CharacterModel, CharacterPresentation};
+        let presentation = position.map(|p| {
+            let position = match p {
+                "left" => videoforge_character::CharacterPosition::Left,
+                "right" => videoforge_character::CharacterPosition::Right,
+                _ => videoforge_character::CharacterPosition::Center,
+            };
+            CharacterPresentation {
+                position,
+                scale: scale.unwrap_or(1.0),
+            }
+        });
+        Character {
+            id: "a".into(),
+            display_name: "A".into(),
+            voice: None,
+            model: Some(CharacterModel {
+                model_type: videoforge_character::MODEL_TYPE_PNG_LIPSYNC.into(),
+                path: None,
+                closed: Some("closed.png".into()),
+                half: Some("half.png".into()),
+                open: Some("open.png".into()),
+            }),
+            expressions: Vec::new(),
+            motions: Vec::new(),
+            presentation,
+        }
+    }
+
+    #[test]
+    fn presentation_transform_maps_position_to_x() {
+        let left = presentation_transform(&png_character(Some("left"), Some(0.5)));
+        assert_eq!(left.x, CHARACTER_POSITION_X_LEFT);
+        assert_eq!(left.scale, 0.5);
+
+        let right = presentation_transform(&png_character(Some("right"), None));
+        assert_eq!(right.x, CHARACTER_POSITION_X_RIGHT);
+        assert_eq!(right.scale, 1.0);
+
+        let default = presentation_transform(&png_character(None, None));
+        assert_eq!(default.x, CHARACTER_POSITION_X_CENTER);
+    }
+
+    #[test]
+    fn resolve_png_sprites_resolves_all_three_paths() {
+        let c = png_character(Some("left"), None);
+        let dir = Path::new("/base");
+        let sprites = resolve_png_sprites(&c, dir).unwrap().unwrap();
+        assert_eq!(sprites.closed, Path::new("/base/closed.png"));
+        assert_eq!(sprites.half, Path::new("/base/half.png"));
+        assert_eq!(sprites.open, Path::new("/base/open.png"));
+    }
+
+    #[test]
+    fn resolve_png_sprites_is_none_for_voice_only_character() {
+        let c = Character {
+            id: "b".into(),
+            display_name: "B".into(),
+            voice: None,
+            model: None,
+            expressions: Vec::new(),
+            motions: Vec::new(),
+            presentation: None,
+        };
+        assert!(resolve_png_sprites(&c, Path::new("/base"))
+            .unwrap()
+            .is_none());
     }
 }
