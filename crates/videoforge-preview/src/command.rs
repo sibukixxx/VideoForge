@@ -12,7 +12,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use videoforge_core::preview::PreviewRequest;
-use videoforge_core::project::VideoProject;
+use videoforge_core::project::{MouthCue, MouthState, VideoProject};
 use videoforge_core::AppError;
 
 pub const AUDIO_SAMPLE_RATE: u32 = 48000;
@@ -41,6 +41,14 @@ pub struct CharacterPlan {
     pub rotation_deg: f32,
     pub opacity: f32,
     pub layer: i32,
+    pub mouth: Option<MouthPlan>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MouthPlan {
+    pub half_source: String,
+    pub open_source: String,
+    pub cues: Vec<MouthCue>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -117,6 +125,11 @@ impl RenderPlan {
                 rotation_deg: c.transform.rotation_deg,
                 opacity: c.transform.opacity.clamp(0.0, 1.0),
                 layer: c.transform.layer,
+                mouth: c.mouth.as_ref().map(|mouth| MouthPlan {
+                    half_source: mouth.half_source.as_str().to_string(),
+                    open_source: mouth.open_source.as_str().to_string(),
+                    cues: mouth.cues.clone(),
+                }),
             })
             .collect();
         characters.sort_by_key(|c| c.layer);
@@ -190,37 +203,48 @@ impl RenderPlan {
         ];
         let mut parts = vec![format!("[0:v]{}[base]", base_chain.join(","))];
         let mut current = "base".to_string();
-        for (i, character) in self.characters.iter().enumerate() {
-            let input = i + 1;
-            let prepared = format!("character{i}");
-            let next = format!("visual{i}");
+        let mut input = 1usize;
+        let mut visual_index = 0usize;
+        for character in &self.characters {
             let target_w = ((w as f32 * 0.45 * character.scale).round() as u32).max(1);
             let target_h = ((h as f32 * 0.75 * character.scale).round() as u32).max(1);
-            let mut filters = vec![
-                format!(
-                    "scale={target_w}:{target_h}:force_original_aspect_ratio=decrease"
-                ),
-                "format=rgba".to_string(),
-                format!(
-                    "colorchannelmixer=aa={}",
-                    fmt_number(character.opacity as f64)
-                ),
-            ];
-            if character.rotation_deg.abs() > f32::EPSILON {
-                filters.push(format!(
-                    "rotate={}:ow=rotw(iw):oh=roth(ih):c=none",
-                    fmt_number(character.rotation_deg.to_radians() as f64)
+            let states: Vec<String> = match &character.mouth {
+                Some(_) => vec![
+                    state_enable(character, MouthState::Closed),
+                    state_enable(character, MouthState::Half),
+                    state_enable(character, MouthState::Open),
+                ],
+                None => vec![clip_enable(character)],
+            };
+            for enable in states {
+                let prepared = format!("character{visual_index}");
+                let next = format!("visual{visual_index}");
+                let mut filters = vec![
+                    format!(
+                        "scale={target_w}:{target_h}:force_original_aspect_ratio=decrease"
+                    ),
+                    "format=rgba".to_string(),
+                    format!(
+                        "colorchannelmixer=aa={}",
+                        fmt_number(character.opacity as f64)
+                    ),
+                ];
+                if character.rotation_deg.abs() > f32::EPSILON {
+                    filters.push(format!(
+                        "rotate={}:ow=rotw(iw):oh=roth(ih):c=none",
+                        fmt_number(character.rotation_deg.to_radians() as f64)
+                    ));
+                }
+                parts.push(format!("[{input}:v]{}[{prepared}]", filters.join(",")));
+                parts.push(format!(
+                    "[{current}][{prepared}]overlay=x='W*{}-w/2':y='H*{}-h/2':enable='{enable}':eof_action=pass[{next}]",
+                    fmt_number(character.x as f64),
+                    fmt_number(character.y as f64),
                 ));
+                current = next;
+                input += 1;
+                visual_index += 1;
             }
-            parts.push(format!("[{input}:v]{}[{prepared}]", filters.join(",")));
-            parts.push(format!(
-                "[{current}][{prepared}]overlay=x='W*{}-w/2':y='H*{}-h/2':enable='between(t,{},{})':eof_action=pass[{next}]",
-                fmt_number(character.x as f64),
-                fmt_number(character.y as f64),
-                ms_to_secs(character.start_ms),
-                ms_to_secs(character.end_ms)
-            ));
-            current = next;
         }
 
         let mut chain = Vec::new();
@@ -266,7 +290,13 @@ impl RenderPlan {
         let mut labels = Vec::new();
         for (i, (_, start)) in self.audio.iter().enumerate() {
             let label = format!("[a{}]", i + 1);
-            let input = 1 + self.characters.len() + i;
+            let input = 1
+                + self
+                    .characters
+                    .iter()
+                    .map(|c| if c.mouth.is_some() { 3 } else { 1 })
+                    .sum::<usize>()
+                + i;
             parts.push(format!(
                 "[{input}:a]aresample={AUDIO_SAMPLE_RATE},aformat=channel_layouts=stereo,adelay={start}:all=1{label}"
             ));
@@ -312,17 +342,17 @@ pub fn build_args(plan: &RenderPlan) -> Vec<OsString> {
     }
     // inputs 1..M: transparent character stills
     for character in &plan.characters {
-        args.extend(
-            [
-                "-loop",
-                "1",
-                "-framerate",
-                &plan.fps.to_string(),
-                "-i",
-                &character.source,
-            ]
-            .map(OsString::from),
-        );
+        let mut sources = vec![character.source.as_str()];
+        if let Some(mouth) = &character.mouth {
+            sources.push(&mouth.half_source);
+            sources.push(&mouth.open_source);
+        }
+        for source in sources {
+            args.extend(
+                ["-loop", "1", "-framerate", &plan.fps.to_string(), "-i", source]
+                    .map(OsString::from),
+            );
+        }
     }
     // remaining inputs: audio
     for (path, _) in &plan.audio {
@@ -376,6 +406,52 @@ fn fmt_secs(s: f64) -> String {
 fn fmt_number(value: f64) -> String {
     let text = format!("{value:.6}");
     text.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+fn clip_enable(character: &CharacterPlan) -> String {
+    format!(
+        "between(t,{},{})",
+        ms_to_secs(character.start_ms),
+        ms_to_secs(character.end_ms)
+    )
+}
+
+fn state_enable(character: &CharacterPlan, state: MouthState) -> String {
+    let Some(mouth) = &character.mouth else {
+        return clip_enable(character);
+    };
+    if mouth.cues.is_empty() {
+        return if state == MouthState::Closed {
+            clip_enable(character)
+        } else {
+            "0".to_string()
+        };
+    }
+    let mut intervals = Vec::new();
+    for (index, cue) in mouth.cues.iter().enumerate() {
+        if cue.state != state {
+            continue;
+        }
+        let start = character.start_ms.saturating_add(u64::from(cue.offset_ms));
+        let end = mouth
+            .cues
+            .get(index + 1)
+            .map(|next| character.start_ms.saturating_add(u64::from(next.offset_ms)))
+            .unwrap_or(character.end_ms)
+            .min(character.end_ms);
+        if start < end {
+            intervals.push(format!(
+                "between(t,{},{})",
+                ms_to_secs(start),
+                ms_to_secs(end)
+            ));
+        }
+    }
+    if intervals.is_empty() {
+        "0".to_string()
+    } else {
+        intervals.join("+")
+    }
 }
 
 /// `#1e1e2e` → `0x1e1e2e`; names pass through.
@@ -616,6 +692,7 @@ mod tests {
                 start_ms: 200,
                 duration_ms: 3000,
                 speaker: Some("zundamon".into()),
+                mouth: None,
                 transform: Transform {
                     x: 0.8,
                     y: 0.55,
@@ -660,6 +737,56 @@ mod tests {
             fc.contains("[2:a]aresample="),
             "audio input index must follow character inputs: {fc}"
         );
+    }
+
+    #[test]
+    fn three_mouth_frames_follow_the_ir_cues() {
+        let mut p = project(false);
+        p.tracks.push(Track {
+            id: "characters".into(),
+            kind: TrackKind::Character,
+            clips: vec![Clip::Character(CharacterClip {
+                id: "character-1".into(),
+                source: RelativeAssetPath::new("assets/character/zundamon/closed.png").unwrap(),
+                start_ms: 1000,
+                duration_ms: 1000,
+                speaker: Some("zundamon".into()),
+                mouth: Some(videoforge_core::project::MouthAnimation {
+                    half_source: RelativeAssetPath::new("assets/character/zundamon/half.png")
+                        .unwrap(),
+                    open_source: RelativeAssetPath::new("assets/character/zundamon/open.png")
+                        .unwrap(),
+                    cues: vec![
+                        MouthCue { offset_ms: 0, state: MouthState::Closed },
+                        MouthCue { offset_ms: 100, state: MouthState::Half },
+                        MouthCue { offset_ms: 250, state: MouthState::Open },
+                    ],
+                }),
+                transform: Transform::default(),
+                presentation: None,
+                extra: BTreeMap::new(),
+            })],
+        });
+        let plan = RenderPlan::build(
+            &p,
+            "black",
+            None,
+            "o.mp4".into(),
+            "/p/.t".into(),
+            ".t".into(),
+        );
+        let args: Vec<String> = build_args(&plan)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        for source in ["closed.png", "half.png", "open.png"] {
+            assert!(args.iter().any(|arg| arg.ends_with(source)), "{source}");
+        }
+        let fc = &args[args.iter().position(|x| x == "-filter_complex").unwrap() + 1];
+        assert!(fc.contains("enable='between(t,1,1.1)'"), "{fc}");
+        assert!(fc.contains("enable='between(t,1.1,1.25)'"), "{fc}");
+        assert!(fc.contains("enable='between(t,1.25,2)'"), "{fc}");
+        assert!(fc.contains("[4:a]aresample="), "{fc}");
     }
 
     #[test]
