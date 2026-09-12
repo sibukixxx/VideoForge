@@ -30,7 +30,8 @@ MVP v0.1 の **Core + CLI**（設計書 Phase 1〜6）と Tauri GUI MVP（Phase 
 | VideoProject IR（ms 基準、Workspace 相対パスのみ許可、未知フィールド保持、image / character / bgm / se clip + presentation） | ✅ |
 | VOICEVOX（audio_query → override → synthesis）、OS キャッシュ（engine version 込みの key）、concurrency、cancel | ✅ 実 VOICEVOX の統合テストは engine が居る時だけ実行（`docs/testing/voicevox-manual-e2e.md`、macOS 確認済） |
 | Timeline / SRT（directive → clip 配置を含む） | ✅ |
-| FFmpeg preview（背景 + 音声配置 + 字幕 + speaker 名 + fade） | ✅ command builder + filtergraph escaping はテスト済。実 FFmpeg の統合テストは ffmpeg が見つかった時だけ実行（`docs/testing/ffmpeg-path-escaping.md`） |
+| FFmpeg preview（背景 + 透過PNG立ち絵 + 音声配置 + 字幕 + speaker 名 + fade） | ✅ `@character`の時間・位置・拡大率・回転・透明度・layerを反映。command builder + filtergraph escapingはテスト済。macOSで基本previewの生成・再生を手動確認済み（2026-09-12） |
+| 資料に基づく台本案（`draft prompt` / `check` / `export`） | ✅ P0。外部AIへのAPI接続や自動公開は行わず、根拠付きJSONと人間の承認を必須にする半自動フロー |
 | YMM4 exporter（Template Patch 方式、Windows path materialize、Windows 限定） | ✅ 合成 fixture でテスト済。**実 YMM4 template での Phase 0 検証は未実施** |
 | Handoff bundle（dir + zip） | ✅ |
 | Tauri GUI（`apps/desktop`: Workspace / Script / Validate / Generate + 進捗 / Preview / Doctor / YMM4 export or bundle） | ✅ MVP。実機での起動確認は `apps/desktop/README.md` のチェックリスト |
@@ -67,12 +68,41 @@ videoforge export ymm4 sample-ymm4-bundle/project.vfp.json
 
 VOICEVOX / FFmpeg なしで配管だけ試す: `videoforge generate scripts/sample.md --fake-tts --no-preview`
 
-## 台本フォーマット
+## 台本を作る
 
-資料からAIで台本案を作る半自動P0は
-[`docs/script-draft-p0.md`](docs/script-draft-p0.md) を参照。
-`draft prompt` → 外部AI → `draft check` → 人間の確認 → `draft export`。
-API接続・自動公開は行いません。
+台本には次の2経路があります。
+
+1. `scripts/*.md` を人間またはエージェントが直接作る
+2. 資料を `brief.json` にまとめ、`draft` コマンドで根拠付きの台本案を作る
+
+P0の「台本自動生成」は、VideoForge自身がLLM APIを呼ぶ完全自動化ではありません。
+`draft prompt`で専用プロンプトを生成し、任意の外部AIで回答JSONを作り、VideoForgeが
+構造検査してから人間が承認します。公開・送信・動画生成は自動実行されません。
+
+```bash
+# fixtures/draft/brief.json を参考に、Workspace内へ brief.json を用意
+videoforge draft prompt brief.json > prompt.txt
+
+# prompt.txt を外部AIへ渡し、JSONだけを response.json として保存
+videoforge draft check brief.json response.json
+
+# check結果の review_hash と、確認者名を明示してMarkdown化
+videoforge draft export brief.json response.json \
+  --reviewed-hash <review_hash> \
+  --reviewer takada \
+  --out scripts/reviewed-draft.md
+
+videoforge validate scripts/reviewed-draft.md
+videoforge generate scripts/reviewed-draft.md
+open generated/reviewed-draft/preview.mp4  # macOS
+```
+
+`fact`の台詞には資料中に実在する短い引用とsource IDが必要です。ただし、この検査は
+引用文字列の存在を確認するだけで、内容の真偽・名誉毀損・著作権・引用の妥当性までは
+判定しません。詳しいJSON形式、承認条件、エラー対応は
+[`docs/script-draft-p0.md`](docs/script-draft-p0.md) を参照してください。
+
+### Markdown台本フォーマット
 
 ```markdown
 ---
@@ -107,6 +137,26 @@ directive は直後の台詞と一緒に始まり、素材は Workspace 相対�
 魔理沙:
 なるほどな。
 ```
+
+### 透過PNGの立ち絵
+
+背景を透過したPNGを `assets/character/<speaker-key>/default.png` に置き、台詞の直前で
+`@character`を指定すると、該当時間だけpreviewへ合成されます。PNGのアルファチャンネルは
+保持され、字幕は立ち絵より前面に描画されます。
+
+```markdown
+@character zundamon[x=0.78, y=0.56, scale=0.9, opacity=1.0, layer=1]
+ずんだもん:
+ぼくの透過PNGが右側に表示されるのだ。
+
+@character metan[src=assets/character/metan/talking.png, x=0.22, y=0.56, scale=0.9]
+四国めたん:
+srcを指定すれば別の表情画像も使えます。
+```
+
+`x` / `y` は画面に対する中心位置（0.0〜1.0）、`scale` は倍率、`opacity` は
+0.0〜1.0、`rotation_deg` は回転角、`layer` は重なり順です。素材の利用規約と
+キャラクターごとのクレジット条件は、配布元で必ず確認してください。
 
 長さの既定（`duration_ms` 省略時）: `@image` は次の `@image` まで、`@character` は同じ話者の次の立ち絵まで、
 `@bgm` は次の `@bgm` まで、`@se` は 1 秒。素材が無い directive は warning になり、その clip だけ飛ばして生成は続く。
@@ -166,5 +216,5 @@ CI 定義（Windows / macOS / Ubuntu matrix + offline smoke + desktop build）�
 ## Next
 
 1. **Phase 0 spike**: 実 YMM4 で template を作成し、`export ymm4` の出力が YMM4 で開けることを Windows で確認（最大の技術リスク）
-2. FFmpeg 実機での preview 確認（日本語フォント指定 `preview.font`）
+2. 台本案P1: 実AI出力を用いた品質・修正時間・費用の評価（自動公開は対象外）
 3. Tauri GUI を Windows / macOS の実機で起動確認（`apps/desktop/README.md` のチェックリスト）
