@@ -76,15 +76,30 @@ title: 動画タイトル
 - `#` で始まる行は見出し（コメント扱い）
 - `@pause` などの directive は v0.1 では未対応（warning になる）
 
-## トレンドから台本を作るとき
+## 資料から台本案を作るとき
 
-VideoForge 本体はトレンド取得や文章生成を行わない（LLM を呼ばない）。ネタ探しと台本執筆は
-エージェント（あなた）の仕事で、成果物として上記フォーマットの Markdown を書く。
+VideoForge 本体はLLM API、Web検索、自動送信、自動公開を行わない。資料を人間が用意し、
+外部AIの回答をVideoForgeで検査・承認してから既存形式のMarkdown台本にする。
 
-1. トレンド元（ニュース RSS、話題のトピックなど）から動画にするネタを1つ選ぶ
-2. 要点を上記フォーマットの台本に落とし込む。話者はサンプルの 霊夢/魔理沙 に限らず、
-   `videoforge.yaml` の `speakers` に登録されているものを自由に使ってよい
-3. `scripts/<slug>.md` として保存し、通常の生成手順（validate → generate）に進む
+1. `fixtures/draft/brief.json` を参考に、テーマ・視聴者・目標秒数・資料本文を持つ
+   `brief.json` をWorkspace内へ用意する
+2. `videoforge draft prompt brief.json > prompt.txt` を実行し、内容と機密性を確認して
+   外部AIへ渡す
+3. AIのJSONだけを `response.json` に保存する
+4. `videoforge draft check brief.json response.json` を実行し、errors、warnings、台本、
+   全factの引用と文脈を人間が確認する
+5. 表示されたreview_hashを使い、確認者名と新規出力先を明示して書き出す
+
+```bash
+videoforge draft export brief.json response.json \
+  --reviewed-hash <review_hash> --reviewer <name> \
+  --out scripts/reviewed-draft.md
+videoforge validate scripts/reviewed-draft.md
+videoforge generate scripts/reviewed-draft.md
+```
+
+自動検査はfactの引用文字列が資料内に存在することを確認するだけで、真偽、法的安全性、
+著作権、引用の妥当性は保証しない。最終動画を視聴してから公開判断すること。
 
 ## 環境確認
 
@@ -132,30 +147,33 @@ cache/
 
 const TREND_SCRIPT_SKILL: &str = r#"---
 name: trend-script
-description: トレンドや時事ネタから VOICEVOX 用の話者付き Markdown 台本を自動生成する。「トレンドで台本」「台本自動生成」「はやりの動画の台本作って」などで発動。
+description: 人間が用意した資料から、根拠と承認を持つVOICEVOX用Markdown台本案を作る。「資料から台本」「台本自動生成」「台本案を作って」などで発動。
 ---
 
-VideoForge 本体はトレンド取得や文章生成を行わない（`AGENTS.md` 参照）。この作業はすべて
-エージェント側（このスキルを実行しているあなた）が担当する。
+VideoForge 本体はLLM API、Web検索、自動送信、自動公開を行わない（`AGENTS.md` 参照）。
+取得元が不明な情報や、ユーザーが利用を承認していない資料を勝手に追加しない。
 
 ## 手順
 
-1. **ネタを決める**: 引数でトピックが指定されていなければ、Web検索などで今話題になっている
-   ニュース/トレンドを1つ選ぶ。ジャンルは問わない。
-2. **話者を確認する**: `videoforge.yaml` の `speakers` を読み、使えるキー/aliasを把握する。
-   サンプルの霊夢/魔理沙に限らず、そのワークスペースの設定に従う。
-3. **台本を書く**: 選んだネタを話者同士の掛け合い（または単一話者のナレーション）に
-   落とし込み、`scripts/<slug>.md` として保存する。フォーマットは `AGENTS.md` の
-   「台本フォーマット」節に従う。
-4. **検証する**: `videoforge validate scripts/<slug>.md` を実行し、エラーがあれば台本を直す。
-5. **生成する**: `videoforge generate scripts/<slug>.md` を実行し、
-   `generated/<slug>/manifest.json` を確認する。VOICEVOX/FFmpegが無い環境では
-   `--fake-tts --no-preview` でも配管確認できる。
+1. **入力を確認する**: `brief.json` のtopic、audience、target_seconds、sourcesを確認する。
+   資料が無い、権利や機密性が不明、または日付・出所が追跡できない場合は人間へ確認する。
+2. **話者を確認する**: `videoforge.yaml` のspeakersを読み、利用可能なキー/aliasを把握する。
+3. **プロンプトを作る**: `videoforge draft prompt brief.json > prompt.txt` を実行する。
+   prompt.txtには資料全文が入るため、外部AIへ渡す前に人間の確認を求める。
+4. **回答を検査する**: 外部AIのJSONだけをresponse.jsonへ保存し、
+   `videoforge draft check brief.json response.json` を実行する。
+5. **人間の承認を待つ**: errorsだけでなく、全factの引用と文脈、warnings、タイトル、
+   権利、公開リスクを人間に確認してもらう。承認を推測・代行しない。
+6. **台本を書き出す**: 人間が確認したreview_hashとreviewerを使って
+   `videoforge draft export ... --out scripts/<slug>.md` を実行する。
+7. **動画を生成する**: `videoforge validate`後に人間の指示があれば`videoforge generate`を
+   実行する。preview.mp4を最後まで視聴するまで公開可能とは報告しない。
 
 ## 注意
 
 - 台本の話者名は固定しない。ワークスペースの `speakers` 設定を必ず読んでから書く。
-- ソースの著作権・引用ルールを守る。原文の丸写しではなく要約・言い換えで台本化する。
+- `draft check`は構造と引用文字列の存在を検査するだけで、真偽や法的安全性を保証しない。
+- unresolved/material_requestsを解決せずに削除しない。自動公開・自動送信しない。
 "#;
 
 pub fn init(dir: &Path, name: Option<&str>) -> Result<InitReport, AppError> {
@@ -260,9 +278,10 @@ mod tests {
     }
 
     #[test]
-    fn agents_md_includes_trend_to_script_guidance() {
+    fn agents_md_includes_grounded_draft_guidance() {
         let content = agents_md("demo");
-        assert!(content.contains("トレンドから台本を作るとき"));
+        assert!(content.contains("資料から台本案を作るとき"));
+        assert!(content.contains("videoforge draft check"));
         assert!(content.contains("videoforge.yaml"));
     }
 
