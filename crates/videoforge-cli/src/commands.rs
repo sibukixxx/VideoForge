@@ -569,7 +569,27 @@ pub async fn preview_fast(
 
     let renderer = FfmpegPreviewRenderer::detect();
     renderer.availability().map_err(anyhow::Error::from)?;
-    let output = out.unwrap_or_else(|| project_dir.join(core_generate::PREVIEW_FAST_FILE));
+    // `project_dir` above is canonicalized (absolute); a relative `--out`
+    // must be too, or the renderer's "scratch dir must be inside the
+    // project dir" check compares an absolute path against a
+    // CWD-relative one and always fails, even when they name the same
+    // location on disk.
+    let output = match out {
+        Some(o) => {
+            let dir = o.parent().filter(|p| !p.as_os_str().is_empty());
+            let dir = match dir {
+                Some(d) => d
+                    .canonicalize()
+                    .with_context(|| format!("--out directory not found: {}", d.display()))?,
+                None => std::env::current_dir().context("resolve current directory")?,
+            };
+            let name = o
+                .file_name()
+                .ok_or_else(|| anyhow!("--out must be a file path, got: {}", o.display()))?;
+            dir.join(name)
+        }
+        None => project_dir.join(core_generate::PREVIEW_FAST_FILE),
+    };
 
     videoforge_core::fastpreview::render(videoforge_core::fastpreview::FastPreviewRequest {
         project: &project,

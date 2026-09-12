@@ -176,20 +176,190 @@ absolute-timeline expressions (fades, captions) from the encoded output window.
 
 - **No real VOICEVOX.** The audio track is silent; actual voice quality, VOICEVOX-specific
   timing, and the TTS cache's interaction with a real engine version string are still only
-  covered by `docs/testing/voicevox-manual-e2e.md`.
-- **`subtitle.position: top`** was not exercised (this run used the default `bottom`) —
-  still an open item in `CLAUDE.md`'s Known Gaps.
-- **The `"slide"` Ken Burns intent** was not exercised (this run used `zoom`).
-- **A video clip's own embedded audio** is still not mixed in (documented gap since P1-4) —
-  the `mandelbrot` clip in this run was `muted=true` for exactly that reason.
+  covered by `docs/testing/voicevox-manual-e2e.md`. A follow-up session tried to close this
+  gap and could not: the sandbox's outbound proxy returns a policy `403` on GitHub release
+  downloads (where the VOICEVOX Engine binary ships from), and per the proxy's own guidance
+  that is a denial to report, not route around.
 - **No visual regression tooling.** Frames were eyeballed once, by hand, in this session;
   there is no automated pixel-diff or golden-frame test here or anywhere else in the repo.
+- **Windows-only and macOS-only surfaces** (the real YMM4 Phase 0 spike, the Tauri GUI
+  launched on a real Windows/macOS machine) are still untouched — this is a Linux sandbox
+  with neither OS available, and no amount of dogfooding here substitutes for someone
+  actually running them.
+- **Live2D frame rendering** is still unbuilt, and deliberately not attempted from this
+  session: `docs/character-licensing.md` flags unresolved licensing questions around any
+  specific Live2D SDK/model choice, and picking one unilaterally risks a bad license call
+  that a human needs to make instead.
+
+## Round 2: subtitle top, Ken Burns slide, render preset comparison, and video's own audio
+
+A follow-up session picked up the remaining open items from Round 1 and found two more real
+bugs — again, only because it rendered through an actual FFmpeg instead of trusting
+command-builder string assertions.
+
+### CI still not enabled (GitHub App token lacks `workflows` scope), but the one flaky test is fixed
+
+Before touching rendering: an attempt was made to move `github-actions-ci.yml`/`micro-wasm.yml`
+out of `docs/ci/` into `.github/workflows/` (the plain `git mv` that directory's own README
+describes). Locally this worked fine — but the push was rejected by GitHub itself: "refusing to
+allow a GitHub App to create or update workflow `.github/workflows/ci.yml` without `workflows`
+permission." This session's GitHub App token has no `workflows` scope, so it cannot push files
+under that path at all, regardless of content. Per this environment's own policy on organization
+authorization denials, this was reported rather than worked around (there is no legitimate
+workaround for a scope a token doesn't have) — the workflow files stay in `docs/ci/`, unchanged
+in content, and someone with a token or account that does carry `workflows` scope needs to do the
+same two-line `git mv` to actually enable them.
+
+While preparing that move, though, real value did come out of the attempt:
+`generate::tests::concurrent_generates_of_one_slug_do_not_race`
+raced two real `generate()` calls via `tokio::join!` and asserted exactly one got `Busy` —
+correct in principle, but it depends on the OS scheduler actually interleaving the two tasks
+within the narrow window one holds the slug's file lock. Under a busy host (many other
+`cargo test` threads competing for CPU) the first `generate()` could run to completion, lock
+release included, before the second was ever polled, so both legitimately succeeded and the
+test's own `panic!("both generates published the same slug")` fired — reproduced repeatedly
+in this environment under full-workspace `cargo test --workspace` load, never under
+`cargo test -p videoforge-core <name>` alone. Rewritten to hold the lock explicitly
+(`SlugLock::acquire`) instead of racing two real generates, removing the scheduler dependency
+entirely while still covering the same two guarantees (a generate attempted while the lock is
+held reports `Busy`; the next one through after release leaves no half-replaced output). Run
+clean 8/8 in isolation and 4/4 full-workspace runs after the fix, versus intermittent
+failures before it.
+
+### Bug: `crop`'s `eval=frame` doesn't exist in this FFmpeg build
+
+Rendering an `@image ... intent=slide` (never exercised in Round 1, which only used `zoom`)
+failed:
+
+```text
+Error applying option 'eval' to filter 'crop': Option not found
+```
+
+`ffmpeg -h filter=crop` lists exactly six AVOptions for `crop`: `w`/`out_w`, `h`/`out_h`,
+`x`, `y`, `keep_aspect`, `exact` — no `eval` at all. Every one of `w`/`h`/`x`/`y` is already
+marked runtime-configurable (`T`) in that listing, meaning `crop` re-evaluates a
+non-constant expression every frame *by construction* — the `eval=frame` suffix
+`ken_burns_filter` appended (copied from filters like `overlay`/`drawtext`/`volume`, which
+*do* have a real `eval` option controlling once-vs-per-frame evaluation) was not just
+redundant, it was invalid syntax that aborted the whole render. Confirmed directly:
+the identical crop expression without `:eval=frame` renders fine. Fixed by dropping the
+suffix from both the `"zoom"` and `"slide"` branches, since both built the same
+`crop=...:eval=frame` shape and are affected identically.
+
+This directly contradicts Round 1's report, which describes a successful real-FFmpeg
+`intent=zoom` render on the merged code — the same code this session confirmed fails. To be
+sure this session's finding wasn't a fluke of the minimal repro above, the exact merged
+`ken_burns_filter` (via `git stash` on `command.rs`, rebuilt) was run against a fresh
+`intent=zoom` script on the same FFmpeg build (`6.1.1-3ubuntu5`, checked with `ffmpeg
+-version`/`dpkg -l` against both rounds) and it failed with the identical `Option not found`
+error — not a version difference, not a different code path. Why Round 1 reported success on
+code that reproducibly fails here could not be determined in this session, and no cause is
+asserted; it is recorded here as an open, unresolved discrepancy rather than papered over.
+What is independently re-verified in Round 2, regardless of that discrepancy: the fix
+(dropping `:eval=frame`) is necessary for both intents, and both render correctly without it
+(see below). The broader lesson still generalizes: command-builder tests alone miss this
+whole class of error, and even a real-FFmpeg pass on one code state doesn't establish that
+same state's behavior at a later point in time — only re-running it does.
+
+Re-verified with real frames: extracted at t=1s and t=5.5s of a slide-intent render, the
+composited pattern visibly shifts position between the two — the pan is actually panning,
+not just failing to error.
+
+### Bug: `bgm_chain`'s `atrim` never reset PTS before `adelay`
+
+Found while implementing the fix below (video audio needs the identical trim+delay shape
+BGM already used) and confirmed with a minimal real-FFmpeg repro:
+
+```bash
+$ ffmpeg -f lavfi -i "sine=frequency=440:duration=5" \
+    -af "atrim=start=2,adelay=1000:all=1,volume=0.5" -f null -   # ends at 5.99s (wrong)
+$ ffmpeg -f lavfi -i "sine=frequency=440:duration=5" \
+    -af "atrim=start=2,asetpts=PTS-STARTPTS,adelay=1000:all=1,volume=0.5" -f null -  # ends at 3.99s (correct)
+```
+
+`atrim` never rewrites output timestamps on its own (FFmpeg's own docs: "you must use the
+`setpts`/`asetpts` filter afterwards" if you need to). Without resetting PTS, `bgm_chain`'s
+`adelay` stacked its offset on top of the untouched `trim_start_ms` PTS instead of replacing
+it — a BGM clip with a non-zero `trim_start_ms` landed later than its configured `start_ms`
+by exactly the trim amount. Fixed by adding `asetpts=PTS-STARTPTS` right after every `atrim`
+in `bgm_chain` (both the looping and non-looping branches). Round 1's dogfood BGM used
+`trim_start_ms=0`, so this never manifested there — a reminder that one passing dogfood run
+does not cover every parameter combination.
+
+### Video clip's own embedded audio now mixes in
+
+Implemented the P1-4 follow-up flagged in Round 1: `Video::volume`/`muted` are now threaded
+through `VisualLayerSource::Video` into `audio_filter`, via a new `video_layer_audio_chain`
+— the audio counterpart to `video_trim_filter`'s picture handling, using the identical
+`[trim_start_ms, trim_start_ms + duration_ms)` window, `atrim` + `asetpts` + `adelay` +
+`volume`. No new FFmpeg input is needed: a video layer's `:a` stream reads from the *same*
+input index its `:v` stream already uses (`RenderPlan::visual_layer_input_index`, now shared
+by both `video_filter` and `audio_filter` so they can never drift).
+
+Verifying this took a wrong turn worth recording: the first verification attempt used
+`ffmpeg -i out.mp4 -ss X -to Y -af volumedetect -f null -` on several time windows and found
+audible signal *everywhere*, including well past the video clip's own end — looked like a
+real bug. It wasn't. `-ss`/`-to` placed after `-i` are *output-mux* options; they restrict
+what gets *written*, not what the filter chain *receives* — `volumedetect` is an
+accumulate-to-EOF stats filter, so every windowed query was silently reporting the *same*
+whole-file statistics regardless of the requested window. Switched to `showspectrumpic`
+(a per-time-bin visual, not a whole-stream aggregate) on the *actual* rendered output and
+got the real answer: an 880 Hz tone embedded in a real video source, placed via
+`@video ...[muted=false]` at `start_ms=1771`, `duration_ms=4000`, appears in the spectrogram
+starting and stopping within a few frames of exactly `1.771s`–`5.771s`, and nowhere else.
+Confirms the feature works correctly; the earlier reading was a measurement artifact of the
+tool, not the code. The general lesson: an aggregate/EOF filter (`volumedetect`,
+`astats` in its default mode) cannot answer a "is X true *in this time window*" question
+even when you hand it an output-side range — reach for a per-time-bin tool
+(`showspectrumpic`, `showwavespic`, or actually trimming the *input* before the filter)
+instead.
+
+### Render preset comparison
+
+Rendered the same 20-second range of the Round-1 dogfood project through all three presets
+(`preview fast --preset <name> --range-ms 0:20000`) and compared:
+
+| Preset | Resolution | Bitrate | File size (20s) |
+|---|---|---|---|
+| `youtube-1080p` | 1920×1080 | 412 kb/s | 1.03 MB |
+| `youtube-short` | 1080×1920 | 334 kb/s | 836 KB |
+| `preview-low` | 960×540 | 220 kb/s | 550 KB |
+
+Frames pulled from `youtube-1080p` and `preview-low` at the same timeline point show the
+expected quality gradient by eye — `youtube-1080p`'s checkerboard test pattern is crisp with
+clean edges, `preview-low`'s is visibly softer with compression blockiness, consistent with
+its `ultrafast`/`crf 30` encode settings being tuned for iteration speed over final quality.
+
+### Bug: `preview fast --out` with a relative path
+
+Found while running the preset comparison above: `--out generated/p1-dogfood/preset-x.mp4`
+(a path relative to the current directory) failed with `"scratch dir ... must be inside the
+project dir"` even though it plainly was, once resolved. `commands::preview_fast` already
+canonicalizes `project_dir` to an absolute path but passed a relative `--out` straight
+through unchanged; the renderer's own "scratch dir must be inside the project dir" check
+then compared an absolute path against a relative one and always failed, regardless of where
+they actually pointed on disk. Fixed by resolving `--out`'s parent directory to an absolute
+path (matching `project_dir`'s own treatment) before use.
+
+### Updated feature-by-feature table
+
+| Feature | Confirmed by Round 2 |
+|---|---|
+| P1-2 Ken Burns `"slide"` | Fixed the `crop`+`eval=frame` bug that made it fail outright; re-verified panning via two extracted frames |
+| P1-3 `subtitle.position: top` | Rendered and visually confirmed (green text, background box, black outline, anchored to the top edge with the configured margin) |
+| P1-4 Video's own audio | Implemented and verified via spectrogram to land exactly on the clip's timeline window |
+| P1-4 BGM trim timing | Found and fixed a real `atrim`/`adelay` PTS bug (non-zero `trim_start_ms` case) |
+| P1-6 Preset comparison | Confirmed distinct resolution/bitrate/visible-quality tradeoffs across all three presets, not just distinct config values |
+| P1-7 `preview fast --out` | Fixed a relative-path resolution bug found while using it |
+| CI | Still parked in `docs/ci/` — this session's push lacks `workflows` scope; the one flaky test that would have affected it is made deterministic |
 
 ## What is and isn't kept
 
-The throwaway workspace, its synthetic assets, the rendered `preview.mp4`/
-`preview.fast.mp4`, and the extracted frame PNGs all lived under the session's scratch
-directory and were not committed — consistent with this repository never committing
-generated output (`generated/` is gitignored) or binary video artifacts. What *is* kept is
-this report, the regression test
-(`overlay_position_expressions_parse_in_a_real_filtergraph`), and the bug fix itself.
+The throwaway workspaces, their synthetic assets, the rendered preview/fast-preview files,
+and the extracted frame PNGs/spectrograms all lived under the session's scratch directory
+and were not committed — consistent with this repository never committing generated output
+(`generated/` is gitignored) or binary video artifacts. What *is* kept is this report, the
+regression tests (`overlay_position_expressions_parse_in_a_real_filtergraph`,
+`video_filter_zoom_intent_only_applies_to_image_layers`'s updated assertions,
+`audio_filter_mixes_a_video_layers_own_audio_when_not_muted`,
+`audio_filter_skips_a_muted_video_layers_audio`), and the bug fixes themselves.

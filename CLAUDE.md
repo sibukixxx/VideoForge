@@ -39,10 +39,10 @@ cargo run -p videoforge-cli -- generate scripts/sample.md --preset preview-low -
 cargo run -p videoforge-cli -- preview fast generated/sample/project.vfp.json --preset preview-low --range-ms 0:15000
 ```
 
-CI (`docs/ci/github-actions-ci.yml`, not yet under `.github/workflows/`) runs fmt → clippy →
-test → release build → an offline smoke run of `init → validate → generate → bundle → export`, with
-FFmpeg installed so the real-FFmpeg tests execute, plus a separate desktop job (pnpm build + cargo
-check/test of the Tauri crate).
+CI (`docs/ci/github-actions-ci.yml`, not yet under `.github/workflows/` — see "Known gaps") runs
+fmt → clippy → test → release build → an offline smoke run of
+`init → validate → generate → bundle → export`, with FFmpeg installed so the real-FFmpeg tests
+execute, plus a separate desktop job (pnpm build + cargo check/test of the Tauri crate).
 
 ### Working without VOICEVOX / FFmpeg
 
@@ -163,22 +163,34 @@ config edit invalidates the incremental-build cache (P0-4) the same as a backgro
 
 ### Audio engine (P1-4)
 
-`RenderPlan::audio_filter` mixes three independent groups of FFmpeg audio inputs — dialogue (as
-before), BGM (`BgmPlan`), and sound effects (`SoundEffectPlan`) — with `amix=inputs=N:duration=
-longest:normalize=0` rather than per-pair `amerge`, so adding a group never restructures the graph.
-BGM/SE inputs are appended at the *end* of the FFmpeg input list, after character sprites, via
-`RenderPlan::bgm_and_se_inputs`/`bgm_input_start`/`se_input_start` — deliberately, so the existing
-`:v`-stream index formulas for visual layers and character overlays (already covered by tests) never
-have to be recomputed when BGM/SE are added or removed. Each BGM clip's chain is, in order: an
-`atrim` bounding a looping (`-stream_loop -1`) source back down to its own `duration_ms` (so the
-otherwise-infinite input still terminates), resample/format, `adelay` to its timeline position,
-optional `dynaudnorm` (the `normalize` flag), its base `volume`, optional `afade` in/out, and —
-the headline feature — **ducking**: a single `volume=eval=frame:volume='if(<union-of-between(t,...)
--windows>,DUCK,1)'` expression that reuses the exact enable-window-union pattern P0-1 established for
-character mouth overlays, applied here to an audio `volume` filter instead of a video `overlay`'s
-`enable=`. `BGM_DUCK_VOLUME` (0.35) is the one constant governing how far BGM drops under dialogue;
-there is no per-clip override yet. A video clip's own embedded audio track is not part of this mix
-(see "Known gaps").
+`RenderPlan::audio_filter` mixes independent groups of FFmpeg audio inputs — dialogue, a `Video`
+visual layer's own embedded audio (unless `muted`), BGM (`BgmPlan`), and sound effects
+(`SoundEffectPlan`) — with `amix=inputs=N:duration=longest:normalize=0` rather than per-pair
+`amerge`, so adding a group never restructures the graph. A `Video` layer's own audio reads its
+`:a` stream from the *same* FFmpeg input `visual_layer_filters` already gives its `:v` stream
+(`RenderPlan::visual_layer_input_index`, shared by both so they can never drift) — no extra input
+needed. BGM/SE inputs, by contrast, are appended at the *end* of the FFmpeg input list, after
+character sprites, via `RenderPlan::bgm_and_se_inputs`/`bgm_input_start`/`se_input_start` —
+deliberately, so the existing `:v`-stream index formulas for visual layers and character overlays
+(already covered by tests) never have to be recomputed when BGM/SE are added or removed.
+
+Each BGM clip's chain is, in order: an `atrim` bounding a looping (`-stream_loop -1`) source back
+down to its own `duration_ms` (so the otherwise-infinite input still terminates) — or, for a
+non-looping clip with `trim_start_ms > 0`, a plain `atrim=start=...` — then **`asetpts=PTS-STARTPTS`**
+(load-bearing: `atrim` never rewrites timestamps on its own, confirmed against a real FFmpeg; without
+this reset, `adelay` below stacks its offset on top of the untouched trim-point PTS instead of
+replacing it, landing the clip later than its configured `start_ms` — a real bug this repo shipped
+and fixed, see "Known gaps"), resample/format, `adelay` to its timeline position, optional
+`dynaudnorm` (the `normalize` flag), its base `volume`, optional `afade` in/out, and — the headline
+feature — **ducking**: a single `volume=eval=frame:volume='if(<union-of-between(t,...)-windows>,
+DUCK,1)'` expression that reuses the exact enable-window-union pattern P0-1 established for character
+mouth overlays, applied here to an audio `volume` filter instead of a video `overlay`'s `enable=`.
+`BGM_DUCK_VOLUME` (0.35) is the one constant governing how far BGM drops under dialogue; there is no
+per-clip override yet. A `Video` layer's own audio chain (`video_layer_audio_chain`) follows the same
+`atrim`+`asetpts`+`adelay` shape, bounded to the same `[trim_start_ms, trim_start_ms + duration_ms)`
+window `video_trim_filter` uses for its picture — confirmed with a real FFmpeg render (an audible
+tone embedded in the video source, verified via spectrogram to start and stop exactly on the clip's
+timeline bounds).
 
 ### Render presets and fast preview (P1-6/P1-7)
 
@@ -285,18 +297,24 @@ These span files and are easy to break silently:
   filter graph needs an FFmpeg built with `drawtext` (libfreetype), and `doctor` reports FFmpeg as
   `ok` without checking for it — on such a build `generate` dies with `preview_render_failed`
   ("No such filter: 'drawtext'") after the TTS work is already done.
-- Visual clip compositing (P1-1/P1-2/P1-5): a full real-FFmpeg dogfood run
-  (`docs/testing/p1-dogfood-e2e.md`) rendered a 5.4-minute, 1920×1080 video exercising a
-  background, two `png_lipsync` character overlays, an `@image` with `intent=zoom`, and an
-  `@video` layer with `trim_start_ms`, and visually confirmed all of it composites
-  correctly — this is also what found and fixed the `overlay=x=/y=` quoting bug documented
-  above. Still unverified against a real FFmpeg: the `"slide"` Ken Burns intent (only
-  `"zoom"` was exercised). `Video::volume`/`muted` are parsed and stored but the video's
-  own embedded audio track is still not extracted or mixed into the audio graph — P1-4
-  landed BGM/SE mixing and dialogue ducking (see "Audio engine" above), but a `Video` clip
-  is silent regardless of its own soundtrack; this is the next follow-up (the dogfood video
-  worked around it with `muted=true`). A `Video` clip and a mismatched `png_lipsync`
-  character overlay could both legally claim the same screen position — nothing detects
+- Visual clip compositing (P1-1/P1-2/P1-5): two real-FFmpeg dogfood rounds
+  (`docs/testing/p1-dogfood-e2e.md`) have now exercised background + two `png_lipsync`
+  character overlays + an `@image` with both `intent=zoom` and `intent=slide` + a `@video`
+  layer with `trim_start_ms`, and visually confirmed all of it composites correctly. This is
+  also what found and fixed three real bugs: the `overlay=x=/y=` quoting bug (see above);
+  `ken_burns_filter` passing `eval=frame` to the `crop` filter, which has no such option at
+  all in this FFmpeg build (confirmed via `ffmpeg -h filter=crop` — none of `w`/`h`/`x`/`y`
+  need one, they already re-evaluate every frame when their expression isn't a constant) and
+  aborted the whole render with "Option not found" — this is why `"slide"` specifically had
+  never been verified before; and `bgm_chain`'s `atrim` never resetting PTS before `adelay`
+  when `trim_start_ms > 0`, which silently shifted a trimmed BGM clip's actual start later
+  than its configured `start_ms` (confirmed with a minimal real-FFmpeg repro). `Video::volume`/
+  `muted` are now mixed into the audio graph too (`video_layer_audio_chain`, the audio
+  counterpart to `video_trim_filter`'s picture handling) — confirmed with a real FFmpeg
+  render carrying an audible tone in its own video track, verified landing at the exact
+  right timeline position via spectrogram (`showspectrumpic`), not just "the render didn't
+  error." A `Video` clip and a mismatched `png_lipsync` character overlay could both legally
+  claim the same screen position — nothing detects
   that; it is on the author, same as any other clip authored by hand. BGM ducking's
   `BGM_DUCK_VOLUME` is a single global constant, not a per-clip or per-config value; the
   dogfood video's BGM chain (loop/fade-in/fade-out/normalize/ducking) rendered without
@@ -330,8 +348,20 @@ These span files and are easy to break silently:
   update `manifest.json` at all) and no "selected scene" CLI convenience — a scene has to
   be turned into a millisecond range by the caller (e.g. from `captions.srt`) before it
   reaches `--range-ms`.
-- The CI workflow is parked in `docs/ci/` because the authoring session could not create files
-  under `.github/workflows/`. Enabling it is a `git mv` (see `docs/ci/README.md`).
+- CI is authored but still parked in `docs/ci/` (`github-actions-ci.yml`, `micro-wasm.yml`), not
+  live under `.github/workflows/`. A session this round attempted to enable it via `git mv` and
+  also fixed a test (`concurrent_generates_of_one_slug_do_not_race`, see the generate.rs history)
+  that would have made a freshly-enabled CI flaky — but the push was rejected by GitHub
+  ("refusing to allow a GitHub App to create or update workflow `.github/workflows/ci.yml` without
+  `workflows` permission"): this session's GitHub App token has no `workflows` scope, and per this
+  environment's own policy that kind of denial is reported rather than routed around. Enabling it
+  is still exactly the `git mv docs/ci/github-actions-ci.yml .github/workflows/ci.yml && git mv
+  docs/ci/micro-wasm.yml .github/workflows/micro-wasm.yml` described in `docs/ci/README.md`,
+  done by whoever/whatever has that permission (a human, or a token with `workflows` scope). Once
+  it is enabled it has never actually run on GitHub's infrastructure either way — every job's
+  individual commands are what this repo's own `cargo test --workspace`/`clippy`/`fmt --check`
+  already run locally, verified repeatedly across sessions, but "watched go green on
+  Windows/macOS runners" remains a real gap until someone does both steps.
 - The Tauri GUI (`apps/desktop`) builds and its command layer is unit-tested, but it has not been
   launched on a real Windows or macOS desktop; the checklist is in `apps/desktop/README.md`.
 - The Live2D half of the character pipeline (`docs/character-system.md`) stops at a

@@ -30,8 +30,8 @@ MVP v0.1 の **Core + CLI**（設計書 Phase 1〜6）と Tauri GUI MVP（Phase 
 | VideoProject IR（ms 基準、Workspace 相対パスのみ許可、未知フィールド保持、image / character / bgm / se clip + presentation） | ✅ |
 | VOICEVOX（audio_query → override → synthesis）、OS キャッシュ（engine version 込みの key）、concurrency、cancel | ✅ 実 VOICEVOX の統合テストは engine が居る時だけ実行（`docs/testing/voicevox-manual-e2e.md`、macOS 確認済） |
 | Timeline / SRT（directive → clip 配置を含む） | ✅ |
-| FFmpeg preview（背景 + 音声配置 + 字幕 + speaker 名 + fade + Image/Character立ち絵/Video合成 + crop/fit/rotation/opacity + fade/pan/zoom transition + on-screen Text）(P1-1/P1-2/P1-5) | ✅ command builder + filtergraph escaping はテスト済。実 FFmpeg の統合テストは ffmpeg が見つかった時だけ実行（`docs/testing/ffmpeg-path-escaping.md`）。P1 dogfood（`docs/testing/p1-dogfood-e2e.md`）で背景+立ち絵2体+image(zoom)+video合成を実 FFmpeg で確認し、overlay座標式の未エスケープによるパースエラーを発見・修正済み。slide は未検証 |
-| Audio Engine（Dialogue / BGM / SE を `amix` で合成、BGM の volume/loop/trim/fade-in-out/normalize、**Dialogue 発話区間での BGM ducking**）(P1-4) | ✅ command builder テスト済。Video clip 自身の音声トラックは未合成（次の課題） |
+| FFmpeg preview（背景 + 音声配置 + 字幕 + speaker 名 + fade + Image/Character立ち絵/Video合成 + crop/fit/rotation/opacity + fade/pan/zoom transition + on-screen Text）(P1-1/P1-2/P1-5) | ✅ command builder + filtergraph escaping はテスト済。実 FFmpeg の統合テストは ffmpeg が見つかった時だけ実行（`docs/testing/ffmpeg-path-escaping.md`）。P1 dogfood（`docs/testing/p1-dogfood-e2e.md`）で背景+立ち絵2体+image(zoom/slide)+video合成を実 FFmpeg で確認し、overlay座標式の未エスケープ、`crop`への無効な`eval=frame`指定の2つのパースエラーを発見・修正済み |
+| Audio Engine（Dialogue / Video clip自身の音声 / BGM / SE を `amix` で合成、BGM の volume/loop/trim/fade-in-out/normalize、**Dialogue 発話区間での BGM ducking**）(P1-4) | ✅ command builder テスト済。実 FFmpeg で音声トラック入り動画クリップのミックスをスペクトログラムで位置確認済み。BGMのtrim+adelayの実FFmpegバグも発見・修正済み |
 | Subtitle Engine（`preview.subtitle`: position top/bottom・margin・font/outline color・outline width・background box・font_scale、話者別 `caption_color`、字幕と立ち絵の安全領域はどちらの edge でも共有）(P1-3) | ✅ command builder テスト済。P1 dogfoodで話者別色・背景ボックス・font_scaleを実 FFmpeg + 実CJKフォントで確認済み。`position: top` は未検証。行の折返しは固定文字数の hard-wrap（CJK 前提） |
 | Render Presets（`youtube-1080p` / `youtube-short` / `preview-low`: 解像度・fps・コーデック・画質・音声ビットレートの一括指定、`videoforge generate --preset`）(P1-6) | ✅ command builder テスト済。P1 dogfoodで `youtube-1080p`/`preview-low` の解像度反映を `ffprobe` で確認済み。ビットレート/画質の主観評価は未実施 |
 | Fast Preview（`--range-ms` による出力側 `-ss`/`-t` トリム、`videoforge preview fast` による既存 project.vfp.json からの再レンダリング — パース・検証・TTS・タイムライン構築を全省略）(P1-7) | ✅ command builder / CLI テスト済。P1 dogfoodで実 FFmpeg 実行を確認（45秒レンジ指定 → 実際に45.000秒の出力、フル生成4分25秒に対し27.5秒）。manifest.json への記録なし |
@@ -177,12 +177,20 @@ GUI: `cd apps/desktop && pnpm install && pnpm tauri dev`（詳細は `apps/deskt
 Micro-Wasm Phase 0（既存timeline schedulerを共有する小規模実験）は
 [`docs/architecture/micro-wasm.md`](docs/architecture/micro-wasm.md) を参照。Web版やFFmpeg Wasm化ではない。
 
-CI 定義（Windows / macOS / Ubuntu matrix + offline smoke + desktop build）は `docs/ci/github-actions-ci.yml` にある。`.github/workflows/ci.yml` へ移動して有効化する（`docs/ci/README.md` 参照）。
+CI 定義（Windows / macOS / Ubuntu matrix + offline smoke + desktop build）は `docs/ci/github-actions-ci.yml` に用意済みだが、
+`.github/workflows/` への `git mv` がこのセッションの GitHub App トークンには `workflows` 権限がなく拒否されたため、まだ有効化されていない
+（手順は `docs/ci/README.md`）。
 
 環境変数: `VIDEOFORGE_CACHE_DIR`（TTS cache の場所）、`VIDEOFORGE_FFMPEG`（ffmpeg バイナリ）、`VIDEOFORGE_YMM4_PATH`（YukkuriMovieMaker.exe）。
 
 ## Next
 
-1. **Phase 0 spike**: 実 YMM4 で template を作成し、`export ymm4` の出力が YMM4 で開けることを Windows で確認（最大の技術リスク）
-2. FFmpeg 実機での preview 確認（日本語フォント指定 `preview.font`）
-3. Tauri GUI を Windows / macOS の実機で起動確認（`apps/desktop/README.md` のチェックリスト）
+1. **Phase 0 spike**: 実 YMM4 で template を作成し、`export ymm4` の出力が YMM4 で開けることを Windows で確認（最大の技術リスク、Windows 実機が必要）
+2. Tauri GUI を Windows / macOS の実機で起動確認（`apps/desktop/README.md` のチェックリスト、実機が必要）
+3. 実 VOICEVOX を使った dogfood（今のところ `--fake-tts` の無音での確認のみ — この環境のプロキシ経由でのダウンロードは 403 で拒否された）
+4. Live2D フレーム描画（設計は決まっているが未着手 — `docs/character-licensing.md` のライセンス確認が先）
+5. CI の有効化: `docs/ci/` から `.github/workflows/` への `git mv`（`workflows` 権限を持つトークン／人が必要 — 詳細は `docs/ci/README.md`）
+
+FFmpeg 実機での preview 確認は `docs/testing/p1-dogfood-e2e.md` で実施済み（Round 1/2 で `overlay` 座標式・
+`crop` の `eval=frame` 指定・`bgm_chain` の PTS リセット漏れという3つの実バグを発見・修正、render preset の
+比較、動画クリップ自身の音声ミックス機能の検証を含む）。

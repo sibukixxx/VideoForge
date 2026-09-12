@@ -69,8 +69,8 @@ otherwise, so `cargo test --workspace` stays offline-safe.
   `drawtext`; skipped on builds without libfreetype. Set `VIDEOFORGE_TEST_FONT` to
   use a specific font file.
 
-CI (`docs/ci/github-actions-ci.yml`) installs FFmpeg on the Windows, macOS and
-Ubuntu runners so both tests actually execute on each OS.
+CI (`docs/ci/github-actions-ci.yml`, not yet enabled under `.github/workflows/`) installs FFmpeg
+on the Windows, macOS and Ubuntu runners so both tests actually execute on each OS.
 
 Run locally:
 
