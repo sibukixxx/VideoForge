@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use videoforge_core::lipsync::{mouth_segments, LipSyncTrack, MouthState};
 use videoforge_core::preview::{CharacterSpriteSet, PreviewRequest};
-use videoforge_core::project::{Transform, VideoProject};
+use videoforge_core::project::{Clip, FitMode, Transform, VideoProject};
 use videoforge_core::AppError;
 
 pub const AUDIO_SAMPLE_RATE: u32 = 48000;
@@ -23,6 +23,18 @@ pub const FADE_SECS: f64 = 0.3;
 /// height at `presentation.scale == 1.0` (P0-1). Hard-coded but named, same
 /// reasoning as the lip-sync amplitude thresholds in `core::lipsync`.
 pub const CHARACTER_BASE_HEIGHT_FRACTION: f64 = 0.62;
+
+/// Default fade-in/fade-out length for a visual clip's `"fade"` intent
+/// (P1-5) when the script didn't say `intent_duration_ms`.
+pub const DEFAULT_INTENT_FADE_MS: u64 = 400;
+/// Ken Burns zoom-in amount for the `"zoom"` intent: the visible crop
+/// shrinks from 100% to `1.0 - ZOOM_IN_FRACTION` of the source over the
+/// clip's own duration (P1-5).
+pub const ZOOM_IN_FRACTION: f64 = 0.15;
+/// Crop window size for the `"slide"` (pan) intent, as a fraction of the
+/// source; the window slides across the remaining `1.0 - PAN_CROP_FRACTION`
+/// of the source over the clip's own duration (P1-5).
+pub const PAN_CROP_FRACTION: f64 = 0.9;
 
 /// One character's overlay plan: where its sprites go, and when `half`/
 /// `open` should cover the always-present `closed` base layer. `closed` has
@@ -89,6 +101,88 @@ pub fn build_character_overlays(
     Ok(overlays)
 }
 
+/// What kind of source a [`VisualLayerPlan`] reads from — affects only the
+/// FFmpeg *input* options (`-loop`, `-stream_loop`), not the filter chain
+/// applied to it, which is identical for every layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisualLayerSource {
+    /// A still image, character stand-in, or background — looped
+    /// (`-loop 1`) so it covers the layer's whole `duration_ms`.
+    Image,
+    /// A general video clip (P1-2).
+    Video {
+        trim_start_ms: u64,
+        /// Repeat the source (`-stream_loop -1`) to fill `duration_ms`.
+        looping: bool,
+    },
+}
+
+/// One general visual clip (`Image`/`Character` stand-in/`Video`) placed on
+/// the timeline (P1-1/P1-2), sharing one compositing implementation instead
+/// of a special renderer per clip kind. Distinct from
+/// [`CharacterOverlayPlan`] (P0-1's closed/half/open mouth-swap), which
+/// stays its own code path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VisualLayerPlan {
+    /// Relative to the project dir (unlike `CharacterOverlayPlan`'s sprite
+    /// paths, which live outside it) — the same rule every other project
+    /// asset path already follows.
+    pub path: String,
+    pub source: VisualLayerSource,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    pub transform: Transform,
+    /// `Presentation::intent`, e.g. `"fade"`/`"slide"`/`"zoom"`/`"cut"` (P1-5).
+    pub intent: Option<String>,
+    pub intent_duration_ms: Option<u64>,
+}
+
+/// Collect every `Image`/`Character` (stand-in)/`Video` clip into one
+/// ordered list of layers, sorted by `Transform::layer` (stable, so clips on
+/// the same layer keep their original track/script order) — pure, no
+/// filesystem access, unlike `build_character_overlays` (which must read
+/// each lip-sync curve off disk).
+pub fn build_visual_layers(project: &VideoProject) -> Vec<VisualLayerPlan> {
+    let mut layers: Vec<VisualLayerPlan> = project
+        .clips()
+        .filter_map(|clip| match clip {
+            Clip::Image(c) => Some(VisualLayerPlan {
+                path: c.source.as_str().to_string(),
+                source: VisualLayerSource::Image,
+                start_ms: c.start_ms,
+                duration_ms: c.duration_ms,
+                transform: c.transform,
+                intent: c.presentation.as_ref().and_then(|p| p.intent.clone()),
+                intent_duration_ms: c.presentation.as_ref().and_then(|p| p.intent_duration_ms),
+            }),
+            Clip::Character(c) => Some(VisualLayerPlan {
+                path: c.source.as_str().to_string(),
+                source: VisualLayerSource::Image,
+                start_ms: c.start_ms,
+                duration_ms: c.duration_ms,
+                transform: c.transform,
+                intent: c.presentation.as_ref().and_then(|p| p.intent.clone()),
+                intent_duration_ms: c.presentation.as_ref().and_then(|p| p.intent_duration_ms),
+            }),
+            Clip::Video(c) => Some(VisualLayerPlan {
+                path: c.source.as_str().to_string(),
+                source: VisualLayerSource::Video {
+                    trim_start_ms: c.trim_start_ms,
+                    looping: c.looping,
+                },
+                start_ms: c.start_ms,
+                duration_ms: c.duration_ms,
+                transform: c.transform,
+                intent: c.presentation.as_ref().and_then(|p| p.intent.clone()),
+                intent_duration_ms: c.presentation.as_ref().and_then(|p| p.intent_duration_ms),
+            }),
+            _ => None,
+        })
+        .collect();
+    layers.sort_by_key(|l| l.transform.layer);
+    layers
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaptionPlan {
     pub start_ms: u64,
@@ -98,6 +192,21 @@ pub struct CaptionPlan {
     /// Relative to the project dir.
     pub text_file: String,
     pub speaker_file: String,
+}
+
+/// One on-screen text clip (P1-1's `TextClip`) ready to render via
+/// `drawtext`, positioned by the same `Transform` every visual clip uses
+/// instead of the fixed caption band `CaptionPlan` always renders in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextPlan {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+    pub transform: Transform,
+    /// Hex color, always populated (defaults applied here, not at render time).
+    pub color: String,
+    /// Relative to the project dir.
+    pub text_file: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -112,6 +221,8 @@ pub struct RenderPlan {
     /// Relative audio paths and their start offsets.
     pub audio: Vec<(String, u64)>,
     pub captions: Vec<CaptionPlan>,
+    /// On-screen text clips (P1-1), distinct from `captions`.
+    pub texts: Vec<TextPlan>,
     pub font: Option<PathBuf>,
     pub output: PathBuf,
     /// Absolute scratch directory (caption text files are written here).
@@ -121,6 +232,12 @@ pub struct RenderPlan {
     /// `png_lipsync` character overlays (P0-1). Empty for a project that
     /// uses no character, or only Live2D ones.
     pub character_overlays: Vec<CharacterOverlayPlan>,
+    /// General `Image`/`Character`-stand-in/`Video` clips (P1-1/P1-2),
+    /// sorted by `Transform::layer`. Composited *before* `character_overlays`
+    /// (backdrops/props sit behind a performing character) and well before
+    /// captions/texts (always on top — P1-3's caption/character layout rule
+    /// extended to every visual clip, not just characters).
+    pub visual_layers: Vec<VisualLayerPlan>,
 }
 
 impl RenderPlan {
@@ -186,6 +303,21 @@ impl RenderPlan {
                 speaker_file: format!("{scratch_rel}/speaker-{:03}.txt", i + 1),
             })
             .collect();
+        const DEFAULT_TEXT_COLOR: &str = "white";
+        let texts = project
+            .text_clips()
+            .iter()
+            .enumerate()
+            .map(|(i, c)| TextPlan {
+                start_ms: c.start_ms,
+                end_ms: c.start_ms + c.duration_ms,
+                text: c.text.clone(),
+                transform: c.transform,
+                color: c.color.clone().unwrap_or_else(|| DEFAULT_TEXT_COLOR.into()),
+                text_file: format!("{scratch_rel}/text-{:03}.txt", i + 1),
+            })
+            .collect();
+        let visual_layers = build_visual_layers(project);
         Self {
             width: project.video.width,
             height: project.video.height,
@@ -195,11 +327,13 @@ impl RenderPlan {
             background_color: normalize_color(background_color),
             audio,
             captions,
+            texts,
             font,
             output,
             scratch_dir,
             scratch_rel,
             character_overlays,
+            visual_layers,
         }
     }
 
@@ -212,6 +346,10 @@ impl RenderPlan {
                 .map_err(|e| AppError::write(&text, e))?;
             let speaker = self.scratch_dir.join(format!("speaker-{:03}.txt", i + 1));
             std::fs::write(&speaker, &c.speaker).map_err(|e| AppError::write(&speaker, e))?;
+        }
+        for (i, t) in self.texts.iter().enumerate() {
+            let path = self.scratch_dir.join(format!("text-{:03}.txt", i + 1));
+            std::fs::write(&path, &t.text).map_err(|e| AppError::write(&path, e))?;
         }
         Ok(())
     }
@@ -282,6 +420,247 @@ impl RenderPlan {
             .join("+")
     }
 
+    /// FFmpeg `overlay` x/y expressions for a general visual clip — same
+    /// normalized-centre placement and frame-bounds clamp as
+    /// `overlay_position_exprs`, but *without* the caption-safe-area
+    /// subtraction: a full-frame diagram or background image is allowed to
+    /// occupy the whole frame (captions still draw on top of it regardless,
+    /// since they are composited last).
+    fn visual_position_exprs(transform: &Transform) -> (String, String) {
+        let x = format!(
+            "min(max(0,{:.4}*main_w-overlay_w/2),main_w-overlay_w)",
+            transform.x
+        );
+        let y = format!(
+            "min(max(0,{:.4}*main_h-overlay_h/2),main_h-overlay_h)",
+            transform.y
+        );
+        (x, y)
+    }
+
+    /// The box a general visual clip's `fit` scales into: the frame itself
+    /// times `Transform::scale` (`scale == 1.0` covers/contains the whole
+    /// frame, matching `FitMode`'s own doc comment — "the frame" is this
+    /// box, not literally the output canvas).
+    fn visual_layer_target_size(&self, scale: f32) -> (u32, u32) {
+        let w = ((self.width as f64) * scale.max(0.0) as f64)
+            .round()
+            .max(2.0) as u32;
+        let h = ((self.height as f64) * scale.max(0.0) as f64)
+            .round()
+            .max(2.0) as u32;
+        (w, h)
+    }
+
+    /// Filter implementing one `FitMode` into a `w`x`h` box. `None` for
+    /// `FitMode::None` — no filter at all, i.e. the source's native pixel
+    /// size, exactly matching its doc comment.
+    fn fit_filter(fit: FitMode, w: u32, h: u32) -> Option<String> {
+        match fit {
+            FitMode::Contain => Some(format!(
+                "scale={w}:{h}:force_original_aspect_ratio=decrease"
+            )),
+            FitMode::Cover => Some(format!(
+                "scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
+            )),
+            FitMode::Stretch => Some(format!("scale={w}:{h}")),
+            FitMode::None => None,
+        }
+    }
+
+    /// `Transform::crop`'s static (time-invariant) crop of the source,
+    /// applied before `fit`/`scale` per its own doc comment.
+    fn static_crop_filter(crop: &videoforge_core::project::CropRect) -> String {
+        format!(
+            "crop=w='iw*{:.4}':h='ih*{:.4}':x='iw*{:.4}':y='ih*{:.4}'",
+            crop.width, crop.height, crop.x, crop.y
+        )
+    }
+
+    /// Ken Burns pan (`"slide"`) / zoom (`"zoom"`) as a *time-varying* crop
+    /// window (`eval=frame`, referencing the filter's own `t`) — deliberately
+    /// not the `zoompan` filter, whose internal frame counter has no relation
+    /// to this graph's shared absolute timeline (every layer's `enable`
+    /// window, and this expression, both key off the same `t`). Still images
+    /// only (P1-5 scope: "don't build a complex editor" — Ken Burns is
+    /// specifically a still-image effect in every mainstream editor too);
+    /// `None` for any other intent, including on a video layer.
+    fn ken_burns_filter(intent: &str, start_ms: u64, duration_ms: u64) -> Option<String> {
+        let start_sec = fmt_secs(start_ms as f64 / 1000.0);
+        let dur_sec = fmt_secs((duration_ms.max(1)) as f64 / 1000.0);
+        let progress = format!("clip((t-{start_sec})/{dur_sec}\\,0\\,1)");
+        match intent {
+            "zoom" => Some(format!(
+                "crop=w='iw*(1-{zf}*{progress})':h='ih*(1-{zf}*{progress})':x='(in_w-out_w)/2':y='(in_h-out_h)/2':eval=frame",
+                zf = ZOOM_IN_FRACTION,
+            )),
+            "slide" => Some(format!(
+                "crop=w='iw*{pf}':h='ih*{pf}':x='(in_w-out_w)*{progress}':y='(in_h-out_h)/2':eval=frame",
+                pf = PAN_CROP_FRACTION,
+            )),
+            _ => None,
+        }
+    }
+
+    /// `"fade"` intent: an alpha ramp in at the clip's own start and out at
+    /// its own end, each `intent_duration_ms` long (default
+    /// `DEFAULT_INTENT_FADE_MS`, capped to half the clip's own duration so
+    /// the two ramps never overlap).
+    fn fade_filters(
+        start_ms: u64,
+        duration_ms: u64,
+        intent_duration_ms: Option<u64>,
+    ) -> Vec<String> {
+        let fade_ms = intent_duration_ms
+            .unwrap_or(DEFAULT_INTENT_FADE_MS)
+            .clamp(1, (duration_ms / 2).max(1));
+        let start_sec = start_ms as f64 / 1000.0;
+        let end_sec = (start_ms + duration_ms) as f64 / 1000.0;
+        let fade_sec = fade_ms as f64 / 1000.0;
+        vec![
+            "format=rgba".to_string(),
+            format!(
+                "fade=t=in:st={}:d={}:alpha=1",
+                fmt_secs(start_sec),
+                fmt_secs(fade_sec)
+            ),
+            format!(
+                "fade=t=out:st={}:d={}:alpha=1",
+                fmt_secs((end_sec - fade_sec).max(start_sec)),
+                fmt_secs(fade_sec)
+            ),
+        ]
+    }
+
+    /// `Transform::rotation_deg`, clockwise around the centre, transparent
+    /// fill outside the rotated bounds (`c=none`) — the canvas expands to
+    /// `rotw`/`roth` so `overlay_w`/`overlay_h` (used for positioning) stay
+    /// correct after rotation.
+    fn rotation_filters(rotation_deg: f32) -> Vec<String> {
+        if rotation_deg == 0.0 {
+            return Vec::new();
+        }
+        let rad = format!("{:.6}*PI/180", rotation_deg);
+        vec![
+            "format=rgba".to_string(),
+            format!("rotate={rad}:ow=rotw({rad}):oh=roth({rad}):c=none"),
+        ]
+    }
+
+    /// `Transform::opacity` as a constant alpha-channel multiplier.
+    fn opacity_filters(opacity: f32) -> Vec<String> {
+        if opacity >= 1.0 {
+            return Vec::new();
+        }
+        vec![
+            "format=rgba".to_string(),
+            format!("colorchannelmixer=aa={:.4}", opacity.clamp(0.0, 1.0)),
+        ]
+    }
+
+    /// A video layer's source-trim + timeline-placement step: bounds the
+    /// source to exactly `[trim_start_ms, trim_start_ms + duration_ms)`
+    /// (the upper bound matters for a looping source, whose input is
+    /// otherwise infinite — `-stream_loop -1`), then shifts its
+    /// (zero-based, post-trim) presentation timestamps so they land on this
+    /// clip's own absolute position on the shared timeline. This is what
+    /// makes a video layer's `t` mean the same thing as an image layer's —
+    /// both equal absolute timeline seconds — so `fade_filters`/
+    /// `ken_burns_filter` (image-only) and the overlay `enable` window all
+    /// key off one consistent clock.
+    fn video_trim_filter(trim_start_ms: u64, start_ms: u64, duration_ms: u64) -> String {
+        let trim_start_sec = fmt_secs(trim_start_ms as f64 / 1000.0);
+        let trim_end_sec = fmt_secs((trim_start_ms + duration_ms) as f64 / 1000.0);
+        let offset_sec = fmt_secs(start_ms as f64 / 1000.0);
+        format!(
+            "trim=start={trim_start_sec}:end={trim_end_sec},setpts=PTS-STARTPTS+{offset_sec}/TB"
+        )
+    }
+
+    /// Full per-layer filter chain, in application order: video trim/offset
+    /// (video only) → static crop → Ken Burns pan/zoom (images only) → fit
+    /// into this layer's target box → rotation → opacity → fade.
+    fn visual_layer_chain(&self, layer: &VisualLayerPlan) -> Vec<String> {
+        let mut chain = Vec::new();
+        if let VisualLayerSource::Video { trim_start_ms, .. } = &layer.source {
+            chain.push(Self::video_trim_filter(
+                *trim_start_ms,
+                layer.start_ms,
+                layer.duration_ms,
+            ));
+        }
+        if let Some(crop) = &layer.transform.crop {
+            chain.push(Self::static_crop_filter(crop));
+        }
+        if matches!(layer.source, VisualLayerSource::Image) {
+            if let Some(intent) = &layer.intent {
+                if let Some(kb) = Self::ken_burns_filter(intent, layer.start_ms, layer.duration_ms)
+                {
+                    chain.push(kb);
+                }
+            }
+        }
+        let (w, h) = self.visual_layer_target_size(layer.transform.scale);
+        if let Some(fit) = Self::fit_filter(layer.transform.fit, w, h) {
+            chain.push(fit);
+        }
+        chain.extend(Self::rotation_filters(layer.transform.rotation_deg));
+        chain.extend(Self::opacity_filters(layer.transform.opacity));
+        if layer.intent.as_deref() == Some("fade") {
+            chain.extend(Self::fade_filters(
+                layer.start_ms,
+                layer.duration_ms,
+                layer.intent_duration_ms,
+            ));
+        }
+        chain
+    }
+
+    /// General visual clip (`Image`/`Character` stand-in/`Video`) overlay
+    /// chain (P1-1/P1-2/P1-5). Returns the filters to append and the label
+    /// the next stage (character overlays, then captions/texts) should read
+    /// from — `input_label` unchanged when there are no visual layers.
+    fn visual_layer_filters(&self, input_label: &str) -> (Vec<String>, String) {
+        let mut filters = Vec::new();
+        let mut current = input_label.to_string();
+        for (i, layer) in self.visual_layers.iter().enumerate() {
+            let input_index = 1 + self.audio.len() + i;
+            let chain = self.visual_layer_chain(layer);
+            let scaled = format!("vis{i}");
+            if chain.is_empty() {
+                filters.push(format!("[{input_index}:v]null[{scaled}]"));
+            } else {
+                filters.push(format!("[{input_index}:v]{}[{scaled}]", chain.join(",")));
+            }
+            let (x, y) = Self::visual_position_exprs(&layer.transform);
+            let enable = format!(
+                "between(t,{},{})",
+                ms_to_secs(layer.start_ms),
+                ms_to_secs(layer.start_ms + layer.duration_ms)
+            );
+            let next = format!("vis{i}out");
+            filters.push(format!(
+                "[{current}][{scaled}]overlay=x={x}:y={y}:enable='{enable}':eof_action=repeat[{next}]"
+            ));
+            current = next;
+        }
+        (filters, current)
+    }
+
+    /// Every visual layer's FFmpeg input options, in the exact order
+    /// `visual_layer_filters` assigns input indices to them — shared by
+    /// `build_args` so the two never drift apart.
+    pub fn visual_layer_inputs(&self) -> Vec<(String, bool, bool)> {
+        // (path, loop_image, stream_loop_video) — see `build_args`.
+        self.visual_layers
+            .iter()
+            .map(|l| match l.source {
+                VisualLayerSource::Image => (l.path.clone(), true, false),
+                VisualLayerSource::Video { looping, .. } => (l.path.clone(), false, looping),
+            })
+            .collect()
+    }
+
     /// Character overlay filter chain: `closed` is always on for the
     /// character's full on-screen presence (an inactive speaker's default
     /// pose); `half`/`open` cover it only during their amplitude-derived
@@ -294,7 +673,7 @@ impl RenderPlan {
         for (i, ov) in self.character_overlays.iter().enumerate() {
             let target_h = self.character_target_height_px(ov.transform.scale);
             let (x, y) = self.overlay_position_exprs(&ov.transform);
-            let base_input = 1 + self.audio.len() + i * 3;
+            let base_input = 1 + self.audio.len() + self.visual_layers.len() + i * 3;
             let layer = |filters: &mut Vec<String>,
                          current: &mut String,
                          suffix: &str,
@@ -384,6 +763,26 @@ impl RenderPlan {
                 quote_filter_value(&c.text_file)
             ));
         }
+        // On-screen text clips (P1-1/P1-3): rendered after captions, so a
+        // title/label is never hidden behind one, positioned by its own
+        // Transform instead of the fixed caption band.
+        for t in &self.texts {
+            let enable = format!(
+                "enable='between(t,{},{})'",
+                ms_to_secs(t.start_ms),
+                ms_to_secs(t.end_ms)
+            );
+            let font_size = ((h as f64 * 0.05) * t.transform.scale.max(0.0) as f64)
+                .round()
+                .max(1.0) as u32;
+            tail.push(format!(
+                "drawtext=textfile={}{font}:fontsize={font_size}:fontcolor={}:borderw=2:bordercolor=black:x={:.4}*w-text_w/2:y={:.4}*h-text_h/2:{enable}",
+                quote_filter_value(&t.text_file),
+                t.color,
+                t.transform.x,
+                t.transform.y,
+            ));
+        }
         let total = self.total_ms as f64 / 1000.0;
         tail.push(format!("fade=t=in:st=0:d={FADE_SECS}"));
         tail.push(format!(
@@ -391,13 +790,15 @@ impl RenderPlan {
             fmt_secs((total - FADE_SECS).max(0.0))
         ));
 
-        if self.character_overlays.is_empty() {
+        if self.character_overlays.is_empty() && self.visual_layers.is_empty() {
             let chain: Vec<String> = base.into_iter().chain(tail).collect();
             return format!("[0:v]{}[v]", chain.join(","));
         }
 
         let mut parts = vec![format!("[0:v]{}[bg0]", base.join(","))];
-        let (overlay_filters, post_overlay_label) = self.character_filters("bg0");
+        let (visual_filters, post_visual_label) = self.visual_layer_filters("bg0");
+        parts.extend(visual_filters);
+        let (overlay_filters, post_overlay_label) = self.character_filters(&post_visual_label);
         parts.extend(overlay_filters);
         parts.push(format!("[{post_overlay_label}]{}[v]", tail.join(",")));
         parts.join(";")
@@ -459,6 +860,28 @@ pub fn build_args(plan: &RenderPlan) -> Vec<OsString> {
     for (path, _) in &plan.audio {
         args.push("-i".into());
         args.push(path.into());
+    }
+    // next inputs: general visual layers (Image/Character stand-in/Video,
+    // P1-1/P1-2), relative to the project dir — order must match
+    // `RenderPlan::visual_layer_filters`'s input-index math.
+    for (path, loop_image, stream_loop_video) in plan.visual_layer_inputs() {
+        if loop_image {
+            args.extend(
+                [
+                    "-loop",
+                    "1",
+                    "-framerate",
+                    &plan.fps.to_string(),
+                    "-i",
+                    &path,
+                ]
+                .map(OsString::from),
+            );
+        } else if stream_loop_video {
+            args.extend(["-stream_loop", "-1", "-i", &path].map(OsString::from));
+        } else {
+            args.extend(["-i", &path].map(OsString::from));
+        }
     }
     // remaining inputs: character sprites (closed/half/open per character,
     // P0-1), absolute paths — like the font, these live outside the project
@@ -613,8 +1036,8 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use videoforge_core::project::{
-        AudioClip, BackgroundClip, CaptionClip, Clip, RelativeAssetPath, Track, TrackKind,
-        VideoSettings,
+        AudioClip, BackgroundClip, CaptionClip, CharacterClip, Clip, CropRect, FitMode, ImageClip,
+        Presentation, RelativeAssetPath, TextClip, Track, TrackKind, VideoClip, VideoSettings,
     };
 
     fn project(with_background: bool) -> VideoProject {
@@ -1096,5 +1519,376 @@ mod tests {
         assert!(ov.half_windows.is_empty());
         // sample at 1050ms (clip start 1000 + t_ms 50) with mouth_open 0.9 → open
         assert_eq!(ov.open_windows, vec![(1050, 1100)]);
+    }
+
+    // --------------------------------------------------- visual layers (P1-1/P1-2/P1-5)
+
+    fn image_clip(id: &str, path: &str, layer: i32, presentation: Option<Presentation>) -> Clip {
+        Clip::Image(ImageClip {
+            id: id.into(),
+            source: RelativeAssetPath::new(path).unwrap(),
+            start_ms: 0,
+            duration_ms: 2000,
+            transform: Transform {
+                layer,
+                ..Transform::default()
+            },
+            presentation,
+            extra: BTreeMap::new(),
+        })
+    }
+
+    fn video_clip(id: &str, path: &str) -> VideoClip {
+        VideoClip {
+            id: id.into(),
+            source: RelativeAssetPath::new(path).unwrap(),
+            start_ms: 1000,
+            duration_ms: 3000,
+            trim_start_ms: 500,
+            volume: 1.0,
+            muted: false,
+            looping: false,
+            transform: Transform::default(),
+            presentation: None,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn build_visual_layers_sorts_by_transform_layer_stably() {
+        let mut p = project(false);
+        p.tracks.push(Track {
+            id: "image".into(),
+            kind: TrackKind::Image,
+            clips: vec![
+                image_clip("image-001", "assets/image/back.png", 5, None),
+                image_clip("image-002", "assets/image/front.png", -1, None),
+            ],
+        });
+        p.tracks.push(Track {
+            id: "character".into(),
+            kind: TrackKind::Character,
+            clips: vec![Clip::Character(CharacterClip {
+                id: "character-001".into(),
+                source: RelativeAssetPath::new("assets/character/reimu/default.png").unwrap(),
+                start_ms: 0,
+                duration_ms: 2000,
+                speaker: Some("reimu".into()),
+                transform: Transform {
+                    layer: 0,
+                    ..Transform::default()
+                },
+                presentation: None,
+                extra: BTreeMap::new(),
+            })],
+        });
+        p.tracks.push(Track {
+            id: "video".into(),
+            kind: TrackKind::Video,
+            clips: vec![Clip::Video(video_clip(
+                "video-001",
+                "assets/video/clip.mp4",
+            ))],
+        });
+
+        let layers = build_visual_layers(&p);
+        let paths: Vec<&str> = layers.iter().map(|l| l.path.as_str()).collect();
+        // sorted by layer: -1 (image-002), 0 (character-001) then default 0
+        // (video-001, VideoClip::transform default layer 0, stable so it
+        // keeps its original relative position after character-001), 5 (image-001)
+        assert_eq!(
+            paths,
+            vec![
+                "assets/image/front.png",
+                "assets/character/reimu/default.png",
+                "assets/video/clip.mp4",
+                "assets/image/back.png",
+            ]
+        );
+    }
+
+    fn plan_with_visual_layers(layers: Vec<VisualLayerPlan>) -> RenderPlan {
+        let mut plan = RenderPlan::build(
+            &project(false),
+            "#000000",
+            None,
+            "o.mp4".into(),
+            "/p/.t".into(),
+            ".t".into(),
+            Vec::new(),
+        );
+        plan.visual_layers = layers;
+        plan
+    }
+
+    fn image_layer(
+        path: &str,
+        start_ms: u64,
+        duration_ms: u64,
+        transform: Transform,
+        intent: Option<&str>,
+        intent_duration_ms: Option<u64>,
+    ) -> VisualLayerPlan {
+        VisualLayerPlan {
+            path: path.into(),
+            source: VisualLayerSource::Image,
+            start_ms,
+            duration_ms,
+            transform,
+            intent: intent.map(str::to_string),
+            intent_duration_ms,
+        }
+    }
+
+    #[test]
+    fn video_filter_composites_an_image_layer_with_fit_and_position() {
+        let layer = image_layer(
+            "assets/image/a.png",
+            500,
+            1000,
+            Transform {
+                x: 0.25,
+                y: 0.75,
+                scale: 0.5,
+                fit: FitMode::Cover,
+                ..Transform::default()
+            },
+            None,
+            None,
+        );
+        let plan = plan_with_visual_layers(vec![layer]);
+        let fc = plan.video_filter();
+        assert!(fc.contains("[3:v]"), "{fc}"); // input 0=bg,1,2=audio(2 clips),3=layer
+        assert!(
+            fc.contains("scale=960:540:force_original_aspect_ratio=increase,crop=960:540"),
+            "{fc}"
+        );
+        assert!(fc.contains("overlay=x=min(max(0,0.2500*main_w-overlay_w/2),main_w-overlay_w)"));
+        assert!(fc.contains("enable='between(t,0.5,1.5)'"));
+        assert!(fc.contains("[vis0out]"));
+    }
+
+    #[test]
+    fn video_filter_applies_static_crop_before_fit() {
+        let layer = image_layer(
+            "assets/image/a.png",
+            0,
+            1000,
+            Transform {
+                crop: Some(CropRect {
+                    x: 0.1,
+                    y: 0.2,
+                    width: 0.5,
+                    height: 0.6,
+                }),
+                ..Transform::default()
+            },
+            None,
+            None,
+        );
+        let plan = plan_with_visual_layers(vec![layer]);
+        let fc = plan.video_filter();
+        assert!(
+            fc.contains("crop=w='iw*0.5000':h='ih*0.6000':x='iw*0.1000':y='ih*0.2000'"),
+            "{fc}"
+        );
+        // crop must come before the fit scale within the same layer's chain
+        // (the background's own base chain also contains "scale=1920:1080",
+        // so search for the fit scale that immediately follows the crop).
+        let crop_pos = fc.find("crop=w='iw*0.5000'").unwrap();
+        let scale_pos = fc[crop_pos..].find("scale=1920:1080").unwrap() + crop_pos;
+        assert!(crop_pos < scale_pos, "{fc}");
+    }
+
+    #[test]
+    fn video_filter_fade_intent_ramps_alpha_at_clip_boundaries() {
+        let layer = image_layer(
+            "assets/image/a.png",
+            1000,
+            2000,
+            Transform::default(),
+            Some("fade"),
+            Some(500),
+        );
+        let plan = plan_with_visual_layers(vec![layer]);
+        let fc = plan.video_filter();
+        assert!(fc.contains("fade=t=in:st=1:d=0.5:alpha=1"), "{fc}");
+        assert!(fc.contains("fade=t=out:st=2.5:d=0.5:alpha=1"), "{fc}");
+    }
+
+    #[test]
+    fn video_filter_zoom_intent_only_applies_to_image_layers() {
+        let image = image_layer(
+            "assets/image/a.png",
+            0,
+            2000,
+            Transform::default(),
+            Some("zoom"),
+            None,
+        );
+        let mut video = video_clip("video-001", "assets/video/clip.mp4");
+        video.presentation = Some(Presentation {
+            role: None,
+            intent: Some("zoom".into()),
+            intent_duration_ms: None,
+        });
+        let video_layer = VisualLayerPlan {
+            path: video.source.as_str().to_string(),
+            source: VisualLayerSource::Video {
+                trim_start_ms: video.trim_start_ms,
+                looping: video.looping,
+            },
+            start_ms: video.start_ms,
+            duration_ms: video.duration_ms,
+            transform: video.transform,
+            intent: video.presentation.as_ref().and_then(|p| p.intent.clone()),
+            intent_duration_ms: None,
+        };
+
+        let plan_image = plan_with_visual_layers(vec![image]);
+        let fc_image = plan_image.video_filter();
+        assert!(fc_image.contains("eval=frame"), "{fc_image}");
+
+        let plan_video = plan_with_visual_layers(vec![video_layer]);
+        let fc_video = plan_video.video_filter();
+        assert!(!fc_video.contains("eval=frame"), "{fc_video}");
+    }
+
+    #[test]
+    fn video_filter_video_layer_gets_trim_and_absolute_setpts_offset() {
+        let layer = VisualLayerPlan {
+            path: "assets/video/clip.mp4".into(),
+            source: VisualLayerSource::Video {
+                trim_start_ms: 500,
+                looping: false,
+            },
+            start_ms: 2000,
+            duration_ms: 3000,
+            transform: Transform::default(),
+            intent: None,
+            intent_duration_ms: None,
+        };
+        let plan = plan_with_visual_layers(vec![layer]);
+        let fc = plan.video_filter();
+        assert!(
+            fc.contains("trim=start=0.5:end=3.5,setpts=PTS-STARTPTS+2/TB"),
+            "{fc}"
+        );
+    }
+
+    #[test]
+    fn build_args_places_visual_layer_inputs_before_character_sprites() {
+        let image = image_layer(
+            "assets/image/a.png",
+            0,
+            1000,
+            Transform::default(),
+            None,
+            None,
+        );
+        let video_layer = VisualLayerPlan {
+            path: "assets/video/clip.mp4".into(),
+            source: VisualLayerSource::Video {
+                trim_start_ms: 0,
+                looping: true,
+            },
+            start_ms: 0,
+            duration_ms: 1000,
+            transform: Transform::default(),
+            intent: None,
+            intent_duration_ms: None,
+        };
+        let plan = plan_with_visual_layers(vec![image, video_layer]);
+        let args: Vec<String> = build_args(&plan)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        // project(false) has 2 audio clips -> inputs 0(bg),1,2(audio),3(image),4(video)
+        let image_i = args.iter().position(|a| a == "assets/image/a.png").unwrap();
+        assert_eq!(args[image_i - 5], "-loop");
+        let video_i = args
+            .iter()
+            .position(|a| a == "assets/video/clip.mp4")
+            .unwrap();
+        assert_eq!(args[video_i - 3], "-stream_loop");
+        assert!(video_i > image_i);
+        let fc = &args[args.iter().position(|x| x == "-filter_complex").unwrap() + 1];
+        assert!(fc.contains("[3:v]"), "{fc}");
+        assert!(fc.contains("[4:v]"), "{fc}");
+    }
+
+    #[test]
+    fn video_filter_renders_text_clips_after_captions() {
+        let mut p = project(false);
+        p.tracks.push(Track {
+            id: "text".into(),
+            kind: TrackKind::Text,
+            clips: vec![Clip::Text(TextClip {
+                id: "text-001".into(),
+                text: "Title".into(),
+                start_ms: 0,
+                duration_ms: 1000,
+                transform: Transform {
+                    x: 0.5,
+                    y: 0.1,
+                    ..Transform::default()
+                },
+                color: Some("#ffcc00".into()),
+                presentation: None,
+                extra: BTreeMap::new(),
+            })],
+        });
+        let plan = RenderPlan::build(
+            &p,
+            "#000000",
+            None,
+            "o.mp4".into(),
+            "/p/.t".into(),
+            ".t".into(),
+            Vec::new(),
+        );
+        let fc = plan.video_filter();
+        assert!(fc.contains("textfile='.t/text-001.txt'"), "{fc}");
+        assert!(fc.contains("fontcolor=#ffcc00"), "{fc}");
+        // must come after the last caption drawtext and before the fade filters
+        let last_caption = fc.rfind("caption-002.txt").unwrap();
+        let text_pos = fc.find("text-001.txt").unwrap();
+        let fade_pos = fc.find("fade=t=in").unwrap();
+        assert!(last_caption < text_pos && text_pos < fade_pos, "{fc}");
+    }
+
+    #[test]
+    fn write_caption_files_also_writes_text_clip_files() {
+        let mut p = project(false);
+        p.tracks.push(Track {
+            id: "text".into(),
+            kind: TrackKind::Text,
+            clips: vec![Clip::Text(TextClip {
+                id: "text-001".into(),
+                text: "Hello Title".into(),
+                start_ms: 0,
+                duration_ms: 1000,
+                transform: Transform::default(),
+                color: None,
+                presentation: None,
+                extra: BTreeMap::new(),
+            })],
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut plan = RenderPlan::build(
+            &p,
+            "#000000",
+            None,
+            "o.mp4".into(),
+            dir.path().join("scratch"),
+            ".t".into(),
+            Vec::new(),
+        );
+        plan.scratch_dir = dir.path().join("scratch");
+        plan.write_caption_files().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(plan.scratch_dir.join("text-001.txt")).unwrap(),
+            "Hello Title"
+        );
     }
 }

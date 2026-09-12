@@ -104,6 +104,27 @@ let two waiters lock different inodes and both believe they won.
 Failures that are recoverable (no FFmpeg, no renderer) become warnings in the manifest via
 `GenerationStage::PreviewSkipped` rather than errors.
 
+### Visual track compositing (P1-1/P1-2/P1-5)
+
+There is no separate "VisualTrack" hierarchy: `Clip::Image`/`Clip::Character`/`Clip::Video` all
+carry the same `Transform` (position/scale/rotation/opacity/z-order/crop) and `Presentation`
+(role/intent) every visual clip has had since P0 — a new clip kind means a new `Clip` variant, not
+a new placement system. `videoforge_preview::command::build_visual_layers` collects them (sorted by
+`Transform::layer`) into one shared compositing pass: each layer is its own FFmpeg input, filtered
+(static crop → Ken Burns pan/zoom for *still images only* → `fit` scale into `frame × scale` →
+rotation → opacity → `"fade"` intent's alpha ramp) and `overlay`'d onto the running frame with
+`enable='between(t,start,end)'`, in this fixed order: background → visual layers → P0-1's character
+`_performance` mouth overlays → captions → on-screen `Text` clips → the whole-video fade in/out.
+Captions/text are always composited last so nothing is ever hidden behind them. A `Video` layer's
+source is `trim`med to `[trim_start_ms, trim_start_ms + duration_ms)` then `setpts`-shifted so its
+timestamps land on its absolute timeline position — this is what makes a video layer's `t` mean the
+same "absolute timeline seconds" as an image layer's, which the crop/fade expressions above rely on.
+Pan/zoom (`crop=...:eval=frame` referencing `t`, not the `zoompan` filter — see the module doc on
+`RenderPlan::ken_burns_filter` for why) has not been verified against a real FFmpeg in this repo yet
+(see "Known gaps"); an overlapping crossfade between adjacent clips is not implemented (each clip's
+own `"fade"` only ramps its own alpha at its own boundaries, not a coordinated dissolve with its
+neighbor) — "don't build a complex editor" per the P1-5 brief.
+
 ### Incremental build (P0-4, minimal)
 
 TTS already skips synthesis per-dialogue via `TtsCache` (keyed on engine version + voice params +
@@ -177,6 +198,15 @@ These span files and are easy to break silently:
   filter graph needs an FFmpeg built with `drawtext` (libfreetype), and `doctor` reports FFmpeg as
   `ok` without checking for it — on such a build `generate` dies with `preview_render_failed`
   ("No such filter: 'drawtext'") after the TTS work is already done.
+- Visual clip compositing (P1-1/P1-2/P1-5) is also command-builder-tested only: the `"fade"`
+  intent's `fade=...:alpha=1` and a `Video` layer's `trim`+`setpts` offsetting follow well-known
+  FFmpeg recipes, but the `"slide"`/`"zoom"` Ken Burns crop expressions (`eval=frame` referencing
+  `t`, `clip(...)`) have not been run against a real FFmpeg from this repo — do that before relying
+  on them. `Video::volume`/`muted` are parsed and stored but not yet mixed into the audio graph
+  (P1-4 is where BGM/SE mixing lands; a video clip's own audio track is the same follow-up). A
+  `Video` clip and a mismatched `png_lipsync` character overlay could both legally claim the same
+  screen position — nothing detects that; it is on the author, same as any other clip authored by
+  hand.
 - The CI workflow is parked in `docs/ci/` because the authoring session could not create files
   under `.github/workflows/`. Enabling it is a `git mv` (see `docs/ci/README.md`).
 - The Tauri GUI (`apps/desktop`) builds and its command layer is unit-tested, but it has not been
