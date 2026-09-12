@@ -109,16 +109,20 @@ pub fn build_character_overlays(
 /// What kind of source a [`VisualLayerPlan`] reads from — affects only the
 /// FFmpeg *input* options (`-loop`, `-stream_loop`), not the filter chain
 /// applied to it, which is identical for every layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VisualLayerSource {
     /// A still image, character stand-in, or background — looped
     /// (`-loop 1`) so it covers the layer's whole `duration_ms`.
     Image,
-    /// A general video clip (P1-2).
+    /// A general video clip (P1-2). Its own audio track — this input's
+    /// `:a` stream, at the same index `visual_layer_filters` gives its
+    /// `:v` stream — is mixed into `audio_filter` unless `muted`.
     Video {
         trim_start_ms: u64,
         /// Repeat the source (`-stream_loop -1`) to fill `duration_ms`.
         looping: bool,
+        volume: f32,
+        muted: bool,
     },
 }
 
@@ -174,6 +178,8 @@ pub fn build_visual_layers(project: &VideoProject) -> Vec<VisualLayerPlan> {
                 source: VisualLayerSource::Video {
                     trim_start_ms: c.trim_start_ms,
                     looping: c.looping,
+                    volume: c.volume,
+                    muted: c.muted,
                 },
                 start_ms: c.start_ms,
                 duration_ms: c.duration_ms,
@@ -610,11 +616,16 @@ impl RenderPlan {
     }
 
     /// Ken Burns pan (`"slide"`) / zoom (`"zoom"`) as a *time-varying* crop
-    /// window (`eval=frame`, referencing the filter's own `t`) — deliberately
-    /// not the `zoompan` filter, whose internal frame counter has no relation
-    /// to this graph's shared absolute timeline (every layer's `enable`
-    /// window, and this expression, both key off the same `t`). Still images
-    /// only (P1-5 scope: "don't build a complex editor" — Ken Burns is
+    /// window, referencing the filter's own `t` — deliberately not the
+    /// `zoompan` filter, whose internal frame counter has no relation to
+    /// this graph's shared absolute timeline (every layer's `enable` window,
+    /// and this expression, both key off the same `t`). `crop`'s `w`/`h`/
+    /// `x`/`y` are re-evaluated every frame by construction whenever their
+    /// expression isn't a bare constant — unlike `overlay`/`drawtext`/
+    /// `volume`, `crop` has no `eval=` option at all (confirmed against a
+    /// real FFmpeg — `eval` on `crop` fails with "Option not found" and
+    /// aborts the whole render); do not add one back. Still images only
+    /// (P1-5 scope: "don't build a complex editor" — Ken Burns is
     /// specifically a still-image effect in every mainstream editor too);
     /// `None` for any other intent, including on a video layer.
     fn ken_burns_filter(intent: &str, start_ms: u64, duration_ms: u64) -> Option<String> {
@@ -623,11 +634,11 @@ impl RenderPlan {
         let progress = format!("clip((t-{start_sec})/{dur_sec}\\,0\\,1)");
         match intent {
             "zoom" => Some(format!(
-                "crop=w='iw*(1-{zf}*{progress})':h='ih*(1-{zf}*{progress})':x='(in_w-out_w)/2':y='(in_h-out_h)/2':eval=frame",
+                "crop=w='iw*(1-{zf}*{progress})':h='ih*(1-{zf}*{progress})':x='(in_w-out_w)/2':y='(in_h-out_h)/2'",
                 zf = ZOOM_IN_FRACTION,
             )),
             "slide" => Some(format!(
-                "crop=w='iw*{pf}':h='ih*{pf}':x='(in_w-out_w)*{progress}':y='(in_h-out_h)/2':eval=frame",
+                "crop=w='iw*{pf}':h='ih*{pf}':x='(in_w-out_w)*{progress}':y='(in_h-out_h)/2'",
                 pf = PAN_CROP_FRACTION,
             )),
             _ => None,
@@ -748,6 +759,14 @@ impl RenderPlan {
         chain
     }
 
+    /// FFmpeg input index for the `i`-th visual layer's own input (its `:v`
+    /// stream in `visual_layer_filters`, its `:a` stream — for a `Video`
+    /// layer's own audio — in `audio_filter`). One shared formula so the
+    /// two can never drift apart.
+    fn visual_layer_input_index(&self, i: usize) -> usize {
+        1 + self.audio.len() + i
+    }
+
     /// General visual clip (`Image`/`Character` stand-in/`Video`) overlay
     /// chain (P1-1/P1-2/P1-5). Returns the filters to append and the label
     /// the next stage (character overlays, then captions/texts) should read
@@ -756,7 +775,7 @@ impl RenderPlan {
         let mut filters = Vec::new();
         let mut current = input_label.to_string();
         for (i, layer) in self.visual_layers.iter().enumerate() {
-            let input_index = 1 + self.audio.len() + i;
+            let input_index = self.visual_layer_input_index(i);
             let chain = self.visual_layer_chain(layer);
             let scaled = format!("vis{i}");
             if chain.is_empty() {
@@ -805,7 +824,7 @@ impl RenderPlan {
         for (i, ov) in self.character_overlays.iter().enumerate() {
             let target_h = self.character_target_height_px(ov.transform.scale);
             let (x, y) = self.overlay_position_exprs(&ov.transform);
-            let base_input = 1 + self.audio.len() + self.visual_layers.len() + i * 3;
+            let base_input = self.visual_layer_input_index(self.visual_layers.len()) + i * 3;
             let layer = |filters: &mut Vec<String>,
                          current: &mut String,
                          suffix: &str,
@@ -951,7 +970,7 @@ impl RenderPlan {
     /// `:a` never needs to reference), so adding BGM/SE inputs here can
     /// never shift any `:v` index computed elsewhere.
     fn bgm_input_start(&self) -> usize {
-        1 + self.audio.len() + self.visual_layers.len() + self.character_overlays.len() * 3
+        self.visual_layer_input_index(self.visual_layers.len()) + self.character_overlays.len() * 3
     }
 
     fn se_input_start(&self) -> usize {
@@ -981,6 +1000,32 @@ impl RenderPlan {
             .collect()
     }
 
+    /// A `Video` visual layer's own embedded audio track, mixed in unless
+    /// `muted` — the audio counterpart to `video_trim_filter`'s `:v`
+    /// handling. The same `[trim_start_ms, trim_start_ms + duration_ms)`
+    /// window, timestamps reset (`atrim` never rewrites them on its own —
+    /// see `bgm_chain`'s note) and then delayed to the clip's absolute
+    /// timeline position, so the picture and its own sound stay in sync.
+    fn video_layer_audio_chain(
+        &self,
+        layer: &VisualLayerPlan,
+        trim_start_ms: u64,
+        volume: f32,
+    ) -> Vec<String> {
+        vec![
+            format!(
+                "atrim=start={}:end={}",
+                fmt_secs(trim_start_ms as f64 / 1000.0),
+                fmt_secs((trim_start_ms + layer.duration_ms) as f64 / 1000.0)
+            ),
+            "asetpts=PTS-STARTPTS".to_string(),
+            format!("aresample={AUDIO_SAMPLE_RATE}"),
+            "aformat=channel_layouts=stereo".to_string(),
+            format!("adelay={}:all=1", layer.start_ms),
+            format!("volume={:.4}", volume.max(0.0)),
+        ]
+    }
+
     /// One BGM clip's filter chain: optional trim (bounding a looping
     /// source back down to its own `duration_ms`, so `-stream_loop -1`
     /// input still terminates), resample/format, `adelay` to its timeline
@@ -996,11 +1041,18 @@ impl RenderPlan {
                 fmt_secs(b.trim_start_ms as f64 / 1000.0),
                 fmt_secs((b.trim_start_ms + b.duration_ms) as f64 / 1000.0)
             ));
+            // `atrim` never rewrites timestamps on its own (confirmed against
+            // a real FFmpeg): without this, `adelay` below stacks its offset
+            // on top of the untouched `trim_start_ms` PTS instead of
+            // replacing it, so a trimmed, non-zero-start BGM lands later
+            // than its configured `start_ms`.
+            chain.push("asetpts=PTS-STARTPTS".to_string());
         } else if b.trim_start_ms > 0 {
             chain.push(format!(
                 "atrim=start={}",
                 fmt_secs(b.trim_start_ms as f64 / 1000.0)
             ));
+            chain.push("asetpts=PTS-STARTPTS".to_string());
         }
         chain.push(format!("aresample={AUDIO_SAMPLE_RATE}"));
         chain.push("aformat=channel_layouts=stereo".to_string());
@@ -1051,6 +1103,22 @@ impl RenderPlan {
                 i + 1
             ));
             labels.push(label);
+        }
+
+        for (i, layer) in self.visual_layers.iter().enumerate() {
+            if let VisualLayerSource::Video {
+                trim_start_ms,
+                muted: false,
+                volume,
+                ..
+            } = layer.source
+            {
+                let input_index = self.visual_layer_input_index(i);
+                let label = format!("[vid{i}]");
+                let chain = self.video_layer_audio_chain(layer, trim_start_ms, volume);
+                parts.push(format!("[{input_index}:a]{}{label}", chain.join(",")));
+                labels.push(label);
+            }
         }
 
         let bgm_start = self.bgm_input_start();
@@ -2273,6 +2341,8 @@ mod tests {
             source: VisualLayerSource::Video {
                 trim_start_ms: video.trim_start_ms,
                 looping: video.looping,
+                volume: video.volume,
+                muted: video.muted,
             },
             start_ms: video.start_ms,
             duration_ms: video.duration_ms,
@@ -2283,11 +2353,11 @@ mod tests {
 
         let plan_image = plan_with_visual_layers(vec![image]);
         let fc_image = plan_image.video_filter();
-        assert!(fc_image.contains("eval=frame"), "{fc_image}");
+        assert!(fc_image.contains("iw*(1-"), "{fc_image}"); // the zoom crop's own expression
 
         let plan_video = plan_with_visual_layers(vec![video_layer]);
         let fc_video = plan_video.video_filter();
-        assert!(!fc_video.contains("eval=frame"), "{fc_video}");
+        assert!(!fc_video.contains("iw*(1-"), "{fc_video}");
     }
 
     #[test]
@@ -2297,6 +2367,8 @@ mod tests {
             source: VisualLayerSource::Video {
                 trim_start_ms: 500,
                 looping: false,
+                volume: 1.0,
+                muted: true,
             },
             start_ms: 2000,
             duration_ms: 3000,
@@ -2327,6 +2399,8 @@ mod tests {
             source: VisualLayerSource::Video {
                 trim_start_ms: 0,
                 looping: true,
+                volume: 1.0,
+                muted: true,
             },
             start_ms: 0,
             duration_ms: 1000,
@@ -2569,6 +2643,54 @@ mod tests {
         assert!(!plan_no_dialogue.audio_filter().contains("if("));
         // the dialogue-bearing plan, by contrast, does duck.
         assert!(plan.audio_filter().contains("if("));
+    }
+
+    fn video_visual_layer(
+        start_ms: u64,
+        duration_ms: u64,
+        trim_start_ms: u64,
+        volume: f32,
+        muted: bool,
+    ) -> VisualLayerPlan {
+        VisualLayerPlan {
+            path: "assets/video/clip.mp4".into(),
+            source: VisualLayerSource::Video {
+                trim_start_ms,
+                looping: false,
+                volume,
+                muted,
+            },
+            start_ms,
+            duration_ms,
+            transform: Transform::default(),
+            intent: None,
+            intent_duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn audio_filter_mixes_a_video_layers_own_audio_when_not_muted() {
+        let layer = video_visual_layer(2000, 3000, 1000, 0.7, false);
+        let plan = plan_with_visual_layers(vec![layer]);
+        let fc = plan.audio_filter();
+        // project(false) has 2 dialogue clips -> visual layers start at input 3.
+        assert!(fc.contains("[3:a]"), "{fc}");
+        assert!(
+            fc.contains("atrim=start=1:end=4,asetpts=PTS-STARTPTS"),
+            "{fc}"
+        );
+        assert!(fc.contains("adelay=2000:all=1"), "{fc}");
+        assert!(fc.contains("volume=0.7000"), "{fc}");
+        assert!(fc.contains("amix=inputs=3"), "{fc}"); // 2 dialogue + this video's own audio
+    }
+
+    #[test]
+    fn audio_filter_skips_a_muted_video_layers_audio() {
+        let layer = video_visual_layer(2000, 3000, 1000, 1.0, true);
+        let plan = plan_with_visual_layers(vec![layer]);
+        let fc = plan.audio_filter();
+        assert!(!fc.contains("[3:a]"), "{fc}");
+        assert!(fc.contains("amix=inputs=2"), "{fc}"); // dialogue only
     }
 
     #[test]

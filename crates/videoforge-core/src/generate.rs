@@ -963,14 +963,27 @@ mod tests {
         names
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    /// This used to race two real `generate()` calls against each other via
+    /// `tokio::join!` and assert exactly one got `Busy`. That depends on the
+    /// OS scheduler actually interleaving the two tasks within the narrow
+    /// window one of them holds the lock — under a busy host (many other
+    /// `cargo test` threads competing for CPU) the first `generate()` could
+    /// run to completion, lock release included, before the second one was
+    /// ever polled, so both legitimately succeeded and the test's own
+    /// `panic!("both generates published the same slug")` fired. Holding
+    /// the slug's lock ourselves instead makes the overlap deterministic —
+    /// no dependence on scheduling luck — while still exercising the same
+    /// two guarantees: a generate attempted while the lock is held reports
+    /// `Busy`, and the next one through after it releases leaves no
+    /// half-replaced output behind.
+    #[tokio::test]
     async fn concurrent_generates_of_one_slug_do_not_race() {
         let dir = tempfile::tempdir().unwrap();
         init::init(dir.path(), Some("t")).unwrap();
         let ws = Workspace::open(dir.path()).unwrap();
         let script = ws.scripts_dir().join("sample.md");
 
-        // Publish a first version so both runs have an existing output to displace.
+        // Publish a first version so the next run has an existing output to displace.
         generate(
             &ws,
             &script,
@@ -980,29 +993,32 @@ mod tests {
         .await
         .unwrap();
 
-        let run = || {
-            generate(
-                &ws,
-                &script,
-                GenerateOptions::default(),
-                GenerateDeps::new(Arc::new(FakeTtsEngine::default())),
-            )
-        };
-        let (a, b) = tokio::join!(run(), run());
-
-        let (winner, loser) = match (a, b) {
-            (Ok(w), Err(l)) | (Err(l), Ok(w)) => (w, l),
-            (Ok(_), Ok(_)) => panic!("both generates published the same slug"),
-            (Err(a), Err(b)) => panic!("neither generate succeeded: {a} / {b}"),
-        };
-
+        let held = SlugLock::acquire(&ws, "sample").expect("lock is free before we hold it");
+        let busy = generate(
+            &ws,
+            &script,
+            GenerateOptions::default(),
+            GenerateDeps::new(Arc::new(FakeTtsEngine::default())),
+        )
+        .await
+        .expect_err("a generate must not proceed while the slug's lock is held");
         assert!(
-            matches!(&loser, AppError::Busy { slug, .. } if slug == "sample"),
-            "the losing generate must report a busy slug, got: {loser}"
+            matches!(&busy, AppError::Busy { slug, .. } if slug == "sample"),
+            "must report a busy slug, got: {busy}"
         );
-        assert_eq!(loser.code(), "busy");
+        assert_eq!(busy.code(), "busy");
+        drop(held);
 
-        // The winner's output is complete, and nothing was left half-replaced.
+        // Once released, the next generate goes through cleanly and leaves
+        // no half-replaced output behind.
+        let winner = generate(
+            &ws,
+            &script,
+            GenerateOptions::default(),
+            GenerateDeps::new(Arc::new(FakeTtsEngine::default())),
+        )
+        .await
+        .unwrap();
         let project = VideoProject::load(&winner.project_path).unwrap();
         assert_eq!(project.audio_clips().len(), 3);
         assert_eq!(leftover_old_dirs(&ws), Vec::<String>::new());

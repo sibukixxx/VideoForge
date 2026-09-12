@@ -165,8 +165,8 @@ browser-facing need or a larger batch hot path.
 
 ## Local verification while CI is unavailable
 
-GitHub Actions is intentionally parked at `docs/ci/micro-wasm.yml` so it does not create permanent
-red checks while runners are unavailable. On a machine with Rust, Node, and `wasm-pack`, run:
+`docs/ci/micro-wasm.yml` runs this once enabled (see `docs/ci/README.md`); it is not yet under
+`.github/workflows/`. To check locally on a machine with Rust, Node, and `wasm-pack`:
 
 ```bash
 ./scripts/verify-micro-wasm.sh
