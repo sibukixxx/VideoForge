@@ -1570,6 +1570,7 @@ dependencies = [
  "tokio",
  "videoforge-character",
  "videoforge-core",
+ "videoforge-export-interchange",
  "videoforge-export-ymm4",
  "videoforge-platform",
  "videoforge-preview",
@@ -1599,6 +1600,16 @@ dependencies = [
  "videoforge-project",
  "videoforge-script",
  "videoforge-timeline",
+]
+
+[[package]]
+name = "videoforge-export-interchange"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "videoforge-core",
+ "videoforge-project",
 ]
 
 [[package]]
