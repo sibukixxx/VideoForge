@@ -1,0 +1,12 @@
+{
+  "name": "videoforge-micro-wasm-experiment",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "wasm-pack build ../../crates/videoforge-timeline-wasm --target web --release --out-dir ../../experiments/micro-wasm/pkg",
+    "serve": "python3 -m http.server 4173 --directory ../..",
+    "smoke": "node scripts/smoke.mjs",
+    "benchmark": "node scripts/benchmark.mjs",
+    "size": "node scripts/size.mjs"
+  }
+}

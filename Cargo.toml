@@ -4,6 +4,7 @@ members = [
     "crates/videoforge-project",
     "crates/videoforge-script",
     "crates/videoforge-timeline",
+    "crates/videoforge-timeline-wasm",
     "crates/videoforge-platform",
     "crates/videoforge-character",
     "crates/videoforge-core",
