@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use videoforge_project::{FitMode, Presentation, RelativeAssetPath, Transform};
+use videoforge_project::{FitMode, MouthAnimation, Presentation, RelativeAssetPath, Transform};
 use videoforge_script::{DirectiveKind, Script};
 use videoforge_timeline::{VisualEvent, VisualEventKind};
 
@@ -78,6 +78,13 @@ pub fn resolve_directives(
         };
         let mut attrs = Attributes::new(name, d.line, attributes, &mut out.warnings);
         let duration_ms = attrs.u64("duration_ms");
+        let mouth_paths = match &d.kind {
+            DirectiveKind::Character { .. } => (
+                attrs.string("mouth_half").map(str::to_string),
+                attrs.string("mouth_open").map(str::to_string),
+            ),
+            _ => (None, None),
+        };
         let kind = match &d.kind {
             DirectiveKind::Image { .. } | DirectiveKind::Character { .. } => {
                 let transform = attrs.transform();
@@ -136,6 +143,52 @@ pub fn resolve_directives(
             ));
         }
 
+        let mouth = match mouth_paths {
+            (None, None) => None,
+            (Some(half), Some(open)) => {
+                let parsed = RelativeAssetPath::new(&half).and_then(|half_source| {
+                    RelativeAssetPath::new(&open).map(|open_source| (half_source, open_source))
+                });
+                match parsed {
+                    Ok((half_source, open_source)) => {
+                        let both_exist = [&half_source, &open_source].iter().all(|asset| {
+                            workspace
+                                .resolve(asset.as_str())
+                                .map(|path| path.is_file())
+                                .unwrap_or(false)
+                        });
+                        if both_exist {
+                            Some(MouthAnimation {
+                                half_source,
+                                open_source,
+                                cues: Vec::new(),
+                            })
+                        } else {
+                            out.warnings.push(ValidationIssue::new(
+                                Some(d.line),
+                                "`@character` mouth_half/mouth_open assets must both exist; lip-sync is disabled",
+                            ));
+                            None
+                        }
+                    }
+                    Err(e) => {
+                        out.errors.push(ValidationIssue::new(
+                            Some(d.line),
+                            format!("`@character` mouth asset path is invalid: {e}"),
+                        ));
+                        None
+                    }
+                }
+            }
+            _ => {
+                out.warnings.push(ValidationIssue::new(
+                    Some(d.line),
+                    "`@character` requires both mouth_half and mouth_open; lip-sync is disabled",
+                ));
+                None
+            }
+        };
+
         let (speaker, transform, presentation) = kind;
         let event_kind = match &d.kind {
             DirectiveKind::Image { .. } => VisualEventKind::Image {
@@ -146,6 +199,7 @@ pub fn resolve_directives(
             DirectiveKind::Character { .. } => VisualEventKind::Character {
                 speaker,
                 source: source.clone(),
+                mouth,
                 transform,
                 presentation,
             },
@@ -474,6 +528,32 @@ mod tests {
                 ("assets/character/alice/default.png", true, None),
             ]
         );
+    }
+
+    #[test]
+    fn character_accepts_complete_three_state_mouth_assets() {
+        let (_d, ws, cfg) = workspace();
+        for path in [
+            "assets/character/reimu/closed.png",
+            "assets/character/reimu/half.png",
+            "assets/character/reimu/open.png",
+        ] {
+            touch(&ws, path);
+        }
+        let r = resolve(
+            &ws,
+            &cfg,
+            "@character 霊夢[src=assets/character/reimu/closed.png, mouth_half=assets/character/reimu/half.png, mouth_open=assets/character/reimu/open.png]\n霊夢:\nやあ\n",
+        );
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        let VisualEventKind::Character { mouth, .. } = &r.directives[0].event.kind else {
+            panic!("expected character event");
+        };
+        let mouth = mouth.as_ref().expect("three-state mouth animation");
+        assert_eq!(mouth.half_source.as_str(), "assets/character/reimu/half.png");
+        assert_eq!(mouth.open_source.as_str(), "assets/character/reimu/open.png");
+        assert!(mouth.cues.is_empty(), "generate fills amplitude cues");
     }
 
     #[test]
