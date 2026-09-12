@@ -5,8 +5,7 @@
 //! This module is the only place that turns `SpeakerConfig::character_id`
 //! into anything: everything downstream (TTS synthesis, the cache key,
 //! `videoforge-timeline`) keeps working with the plain numeric
-//! `VoiceParams::speaker_id` it always has, so a workspace that never sets
-//! `character_id` is completely unaffected by this feature existing.
+//! `VoiceParams::speaker_id` it always has.
 
 use std::path::{Path, PathBuf};
 
@@ -18,25 +17,11 @@ use crate::error::AppError;
 use crate::tts::{Speaker, TtsEngine};
 use crate::workspace::Workspace;
 
-// Horizontal slot a `png_lipsync` character's `presentation.position` maps
-// onto, in the same normalized-centre coordinate system every other visual
-// clip's `Transform` already uses (`videoforge_project::Transform`). Hard-
-// coded for P0 (design: "thresholdはhard-codeする場合でも定数化する") —
-// chosen so two characters at `left`/`right` sit clear of both the frame
-// edge and each other.
 pub const CHARACTER_POSITION_X_LEFT: f32 = 0.20;
 pub const CHARACTER_POSITION_X_CENTER: f32 = 0.5;
 pub const CHARACTER_POSITION_X_RIGHT: f32 = 0.80;
-/// Default vertical centre for a character sprite: low enough to read as
-/// "standing", clamped further at render time (`videoforge-preview`) to
-/// never overlap the caption safe area.
 pub const CHARACTER_POSITION_Y: f32 = 0.80;
 
-/// Map a character's declared `presentation` (or its default, when unset)
-/// onto the one placement concept every visual clip already uses. This is
-/// the *only* place that interprets `CharacterPosition`; both
-/// `core::generate` (writing `project.vfp.json`) and any future consumer of
-/// the project IR see a plain `Transform`, not the character crate's enum.
 pub fn presentation_transform(character: &Character) -> Transform {
     let presentation = character.presentation.unwrap_or_default();
     let x = match presentation.position {
@@ -52,9 +37,6 @@ pub fn presentation_transform(character: &Character) -> Transform {
     }
 }
 
-/// Absolute, resolved paths to a `png_lipsync` character's three sprites —
-/// resolved the same way as a Live2D `model.path` (design §6: outside the
-/// project IR, outside the workspace, never copied into `generated/`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPngSprites {
     pub closed: PathBuf,
@@ -62,9 +44,6 @@ pub struct ResolvedPngSprites {
     pub open: PathBuf,
 }
 
-/// Resolve a character's PNG sprites, if it has a `png_lipsync` model.
-/// `Ok(None)` for a voice-only character, a Live2D character (frame
-/// rendering is still Phase 1), or a character with no model at all.
 pub fn resolve_png_sprites(
     character: &Character,
     manifest_dir: &Path,
@@ -82,18 +61,11 @@ pub fn resolve_png_sprites(
     }))
 }
 
-/// A loaded character manifest plus the path it was loaded from, so callers
-/// that need to resolve a character's (possibly relative) model path know
-/// what directory to resolve it against.
 pub struct LoadedManifest {
     pub manifest: CharacterManifest,
     pub path: PathBuf,
 }
 
-/// Load the character manifest a workspace's config points at. Returns
-/// `Ok(None)` when no speaker links a character — the common case for a
-/// project that does not use this feature at all, and a hard no-op with no
-/// filesystem access.
 pub fn load_manifest(
     config: &Config,
     workspace: &Workspace,
@@ -101,10 +73,6 @@ pub fn load_manifest(
     if !config.speakers.values().any(|s| s.character_id.is_some()) {
         return Ok(None);
     }
-    // `Config::validate` already rejects character_id without a manifest
-    // path, but this function is also used by callers (like `doctor`) that
-    // may hold an unvalidated config; fail the same way here rather than
-    // panicking.
     let rel = config
         .character_manifest
         .as_deref()
@@ -117,16 +85,38 @@ pub fn load_manifest(
     Ok(Some(LoadedManifest { manifest, path }))
 }
 
-/// Fill in `SpeakerConfig::voice.speaker_id` for every speaker whose linked
-/// character declares a VOICEVOX voice by name, using `tts.list_speakers()`.
-/// A no-op — no network call at all — when no speaker links a character with
-/// a voice, so existing numeric-id configs are completely unaffected.
+/// Resolve character-linked named voices and, for a real TTS engine, enforce
+/// issue #46 speaker-profile consistency before generation proceeds.
+///
+/// The synthetic `fake` engine is deliberately exempt from the legacy
+/// numeric-id identity guard: it is used by offline tests and does not claim
+/// to model a real VOICEVOX installation. Character-linked fake fixtures are
+/// still resolved normally so the character pipeline remains fully testable.
 pub async fn resolve_character_voices(
     config: &mut Config,
     workspace: &Workspace,
     tts: &dyn TtsEngine,
 ) -> Result<(), AppError> {
-    let Some(loaded) = load_manifest(config, workspace)? else {
+    let loaded = load_manifest(config, workspace)?;
+    let needs_character_resolution = loaded.is_some();
+    let needs_profile_guard = tts.id() != "fake";
+
+    if !needs_character_resolution && !needs_profile_guard {
+        return Ok(());
+    }
+
+    let engine_speakers = tts.list_speakers().await?;
+
+    if needs_profile_guard {
+        let profile_report = crate::speaker_profile::resolve_speaker_profiles_from_list(
+            config,
+            workspace,
+            &engine_speakers,
+        )?;
+        crate::speaker_profile::ensure_generation_safe_profiles(&profile_report, workspace)?;
+    }
+
+    let Some(loaded) = loaded else {
         return Ok(());
     };
     let manifest = &loaded.manifest;
@@ -137,7 +127,6 @@ pub async fn resolve_character_voices(
         .map(|(k, _)| k.clone())
         .collect();
 
-    let mut speakers_cache: Option<Vec<Speaker>> = None;
     for key in keys {
         let character_id = config.speakers[&key]
             .character_id
@@ -153,20 +142,11 @@ pub async fn resolve_character_voices(
         let Some(voice) = &character.voice else {
             continue;
         };
-        let speakers = match &speakers_cache {
-            Some(s) => s,
-            None => {
-                speakers_cache = Some(tts.list_speakers().await?);
-                speakers_cache.as_ref().expect("just inserted")
-            }
-        };
-        let id =
-            resolve_speaker_style_id(speakers, &voice.speaker, &voice.style).ok_or_else(|| {
-                AppError::VoicevoxSpeakerNotFound {
-                    speaker: voice.speaker.clone(),
-                    style: voice.style.clone(),
-                    known: describe_speakers(speakers),
-                }
+        let id = resolve_speaker_style_id(&engine_speakers, &voice.speaker, &voice.style)
+            .ok_or_else(|| AppError::VoicevoxSpeakerNotFound {
+                speaker: voice.speaker.clone(),
+                style: voice.style.clone(),
+                known: describe_speakers(&engine_speakers),
             })?;
         config
             .speakers
@@ -203,10 +183,6 @@ mod tests {
     use crate::init;
     use crate::tts::FakeTtsEngine;
 
-    /// A complete, minimal `videoforge.yaml` body (must include its own
-    /// `speakers:` block) parsed directly — deliberately not layered on top
-    /// of `default_config_yaml`, whose own `speakers:` block would otherwise
-    /// collide with the one under test.
     fn workspace_with_config(yaml: &str) -> (tempfile::TempDir, Workspace, Config) {
         let dir = tempfile::tempdir().unwrap();
         init::init(dir.path(), Some("t")).unwrap();
@@ -221,6 +197,16 @@ mod tests {
         let (_dir, ws, cfg) =
             workspace_with_config("speakers:\n  a:\n    voice:\n      speaker_id: 1\n");
         assert!(load_manifest(&cfg, &ws).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn fake_plain_speaker_stays_offline_compatible() {
+        let (_dir, ws, mut cfg) = workspace_with_config(
+            "speakers:\n  reimu:\n    aliases: [霊夢]\n    voice:\n      speaker_id: 2\n",
+        );
+        let tts = FakeTtsEngine::default();
+        resolve_character_voices(&mut cfg, &ws, &tts).await.unwrap();
+        assert_eq!(cfg.speakers["reimu"].voice.speaker_id, 2);
     }
 
     #[tokio::test]
@@ -247,8 +233,6 @@ mod tests {
 
         let tts = FakeTtsEngine::default();
         resolve_character_voices(&mut cfg, &ws, &tts).await.unwrap();
-        // FakeTtsEngine::list_speakers() always returns Speaker{name:"Fake", styles:[{id:0,name:"silence"}]},
-        // matching the mock manifest's voice{speaker:"Fake", style:"silence"}.
         assert_eq!(cfg.speakers["tsumugi"].voice.speaker_id, 0);
     }
 
