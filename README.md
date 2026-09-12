@@ -58,6 +58,9 @@ videoforge validate scripts/sample.md
 videoforge generate scripts/sample.md   # → generated/sample/
 ```
 
+`doctor` はFFmpegの存在だけでなく、preview生成で使うfilterと既定encoderも確認する。
+例えばlibfreetypeなしで `drawtext` を持たないFFmpegは、TTS開始前に警告される。
+
 Windows で YMM4 プロジェクトにする:
 
 ```bash
