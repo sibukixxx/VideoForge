@@ -1,0 +1,17 @@
+# Mock Character Manifest used by VideoForge's own test suite.
+#
+# This is NOT a Live2D asset: `model3.json` here is a synthetic, minimal
+# stand-in with the same field names a real Cubism model3.json uses, holding
+# no meshes, textures, or copyrighted content of any kind (design §27). It
+# exists so character-manifest parsing, VOICEVOX name resolution, expression /
+# motion validation, and lip-sync generation can be tested fully offline.
+characters:
+  - id: mock
+    display_name: "Mock Character"
+    voice:
+      provider: voicevox
+      speaker: "Fake"
+      style: "silence"
+    model:
+      type: live2d
+      path: "./model3.json"

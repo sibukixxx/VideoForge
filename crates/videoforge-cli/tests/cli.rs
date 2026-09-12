@@ -341,3 +341,152 @@ fn directives_become_clips_and_missing_assets_are_warnings() {
         "{manifest}"
     );
 }
+
+fn mock_character_dir() -> PathBuf {
+    repo_root().join("fixtures/character/mock-character")
+}
+
+#[test]
+fn character_inspect_reports_voice_and_model() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (code, stdout, stderr) = run(
+        tmp.path(),
+        &[
+            "character",
+            "inspect",
+            mock_character_dir().join("manifest.yaml").to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stdout.contains("Mock Character"));
+    assert!(stdout.contains("voicevox / Fake / silence"));
+    assert!(stdout.contains("smile"));
+    assert!(stdout.contains("Wave"));
+}
+
+#[test]
+fn character_inspect_json_reports_expressions_and_motions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (code, stdout, stderr) = run(
+        tmp.path(),
+        &[
+            "--json",
+            "character",
+            "inspect",
+            mock_character_dir().join("manifest.yaml").to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect(&stdout);
+    let character = &payload["characters"][0];
+    assert_eq!(character["id"], "mock");
+    assert_eq!(character["voice"]["speaker"], "Fake");
+    assert_eq!(character["model"]["expressions"][1], "smile");
+    assert_eq!(character["model"]["motions"][1], "Wave");
+}
+
+#[test]
+fn character_validate_resolves_fake_voice_and_exits_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (code, stdout, stderr) = run(
+        tmp.path(),
+        &[
+            "character",
+            "validate",
+            mock_character_dir().join("manifest.yaml").to_str().unwrap(),
+            "--fake-tts",
+        ],
+    );
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stdout.contains("speaker_id 0"));
+    assert!(stdout.trim_end().ends_with("OK"));
+}
+
+#[test]
+fn character_validate_fails_on_unknown_speaker_and_missing_model() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("bad.yaml");
+    std::fs::write(
+        &manifest_path,
+        "characters:\n  - id: ghost\n    display_name: Ghost\n    voice:\n      provider: voicevox\n      speaker: Nobody\n      style: Nothing\n    model:\n      type: live2d\n      path: ./missing.json\n",
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = run(
+        tmp.path(),
+        &[
+            "--json",
+            "character",
+            "validate",
+            manifest_path.to_str().unwrap(),
+            "--fake-tts",
+        ],
+    );
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect(&stdout);
+    assert_eq!(payload["ok"], false);
+    let character = &payload["characters"][0];
+    assert_eq!(character["ok"], false);
+    assert!(character["voice"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("Nobody"));
+    assert!(character["model"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("not found"));
+}
+
+#[test]
+fn generate_with_a_linked_character_produces_a_performance_track_and_lipsync_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("demo");
+
+    let (code, stdout, stderr) = run(tmp.path(), &["init", "demo"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+
+    std::fs::copy(
+        mock_character_dir().join("manifest.yaml"),
+        ws.join("characters.yaml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        mock_character_dir().join("model3.json"),
+        ws.join("model3.json"),
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("videoforge.yaml"),
+        "character_manifest: characters.yaml\nspeakers:\n  tsumugi:\n    character_id: mock\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("scripts/character.md"),
+        "tsumugi[expression=smile, motion=Wave]:\nこんにちは。春日部つむぎです。\n",
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = run(
+        &ws,
+        &["generate", "scripts/character.md", "--fake-tts", "--json"],
+    );
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let gen: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let out_dir = PathBuf::from(gen["output_dir"].as_str().unwrap());
+
+    let project: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out_dir.join("project.vfp.json")).unwrap())
+            .unwrap();
+    let perf_track = project["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["kind"] == "character_performance")
+        .expect("a character_performance track");
+    let clip = &perf_track["clips"][0];
+    assert_eq!(clip["character"], "mock");
+    assert_eq!(clip["expression"], "smile");
+    assert_eq!(clip["motion"], "Wave");
+    let lip_sync_rel = clip["lip_sync"].as_str().unwrap();
+    assert!(out_dir.join(lip_sync_rel).is_file(), "{lip_sync_rel}");
+}

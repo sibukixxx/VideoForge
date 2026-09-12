@@ -1,0 +1,9 @@
+{
+  "title": "動画制作の流れ（合成テスト）",
+  "dialogues": [
+    {"speaker": "reimu", "text": "台本を確認してから音声を作ります。", "kind": "fact", "evidence": [{"source_id": "S1", "quote": "台本を確認してから音声を作ります。"}]},
+    {"speaker": "marisa", "text": "字幕と音声の時刻を合わせます。", "kind": "fact", "evidence": [{"source_id": "S1", "quote": "字幕と音声の時刻を合わせます。"}]}
+  ],
+  "unresolved": [],
+  "material_requests": []
+}

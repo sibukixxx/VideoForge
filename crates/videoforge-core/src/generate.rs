@@ -38,7 +38,9 @@ use tokio_util::sync::CancellationToken;
 use videoforge_platform::platform_label;
 use videoforge_project::{RelativeAssetPath, SourceInfo, VideoProject};
 use videoforge_timeline::srt::{self, SrtOptions};
-use videoforge_timeline::{DialogueInput, TimelineInput, TimelineOptions};
+use videoforge_timeline::{
+    CharacterPerformanceInput, DialogueInput, TimelineInput, TimelineOptions,
+};
 
 use crate::config::Config;
 use crate::error::AppError;
@@ -117,7 +119,13 @@ pub async fn generate(
     deps: GenerateDeps,
 ) -> Result<GeneratedProject, AppError> {
     let progress = Arc::clone(&deps.progress);
-    let config = workspace.load_config()?;
+    let mut config = workspace.load_config()?;
+    // Resolve any speaker linked to a character (design §5) to a numeric
+    // VOICEVOX speaker_id *before* validation, so `validate_script` bakes
+    // the resolved id into `ResolvedDialogue::voice` like any other speaker.
+    // A no-op — no network call — when no speaker links a character.
+    crate::character::resolve_character_voices(&mut config, workspace, deps.tts.as_ref()).await?;
+    let config = config;
 
     progress.on_stage(&GenerationStage::Parsing);
     let script = videoforge_script::parse_file(script_path)?;
@@ -245,6 +253,60 @@ async fn run_pipeline(
         });
     }
 
+    // --- Character performance (Live2D lip-sync) --------------------------
+    // Only speakers linked to a character with a Live2D model get a
+    // performance clip (design §9, §11); a voice-only character, or a
+    // project that never uses this feature, adds nothing here and no
+    // `character_performance` track is emitted at all.
+    let character_manifest = crate::character::load_manifest(config, workspace)?;
+    let mut character_performance = Vec::new();
+    if let Some(loaded) = &character_manifest {
+        let by_index: std::collections::HashMap<usize, &validate::ResolvedDialogue> =
+            report.dialogues.iter().map(|d| (d.index, d)).collect();
+        for s in &synthesized {
+            let Some(resolved) = by_index.get(&s.index) else {
+                continue;
+            };
+            let Some(character_id) = &resolved.character_id else {
+                continue;
+            };
+            let Some(character) = loaded.manifest.find(character_id) else {
+                continue;
+            };
+            if character.model.is_none() {
+                continue;
+            }
+            let track =
+                crate::lipsync::analyze_amplitude(&s.wav, crate::lipsync::DEFAULT_INTERVAL_MS)
+                    .map_err(|reason| AppError::LipSyncGenerationFailed {
+                        index: s.index,
+                        reason,
+                    })?;
+            let dir = tmp_dir.join("assets").join("character").join(character_id);
+            std::fs::create_dir_all(&dir).map_err(|e| AppError::write(&dir, e))?;
+            let file = format!("lipsync-{:03}.json", s.index);
+            let path = dir.join(&file);
+            let json = track
+                .to_json()
+                .map_err(|e| AppError::serialization("lipsync", e))?;
+            std::fs::write(&path, json).map_err(|e| AppError::write(&path, e))?;
+            let rel = RelativeAssetPath::new(format!("assets/character/{character_id}/{file}"))?;
+            character_performance.push(CharacterPerformanceInput {
+                index: s.index,
+                character: character_id.clone(),
+                expression: resolved
+                    .expression
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string()),
+                motion: resolved
+                    .motion
+                    .clone()
+                    .unwrap_or_else(|| "idle".to_string()),
+                lip_sync: rel,
+            });
+        }
+    }
+
     // --- Background asset ------------------------------------------------
     let background = match &config.preview.background {
         Some(bg) => {
@@ -302,6 +364,7 @@ async fn run_pipeline(
         dialogues,
         background,
         visual_events,
+        character_performance,
         options: TimelineOptions {
             dialogue_gap_ms: config.timeline.dialogue_gap_ms,
         },
@@ -522,6 +585,67 @@ mod tests {
             Vec::<String>::new(),
             "the displaced output must be removed once the new one is in place"
         );
+    }
+
+    #[tokio::test]
+    async fn end_to_end_with_character_performance() {
+        let dir = tempfile::tempdir().unwrap();
+        init::init(dir.path(), Some("t")).unwrap();
+
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/character/mock-character/manifest.yaml"
+            ),
+            dir.path().join("characters.yaml"),
+        )
+        .unwrap();
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/character/mock-character/model3.json"
+            ),
+            dir.path().join("model3.json"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("videoforge.yaml"),
+            "character_manifest: characters.yaml\nspeakers:\n  tsumugi:\n    character_id: mock\n",
+        )
+        .unwrap();
+
+        let ws = Workspace::open(dir.path()).unwrap();
+        let script = ws.scripts_dir().join("character.md");
+        std::fs::write(
+            &script,
+            "tsumugi[expression=smile, motion=Wave]:\nこんにちは。春日部つむぎです。\n",
+        )
+        .unwrap();
+
+        let deps = GenerateDeps::new(Arc::new(FakeTtsEngine::default()));
+        let out = generate(&ws, &script, GenerateOptions::default(), deps)
+            .await
+            .unwrap();
+
+        let project = VideoProject::load(&out.project_path).unwrap();
+        let perf = project.character_performance_clips();
+        assert_eq!(perf.len(), 1);
+        assert_eq!(perf[0].character, "mock");
+        assert_eq!(perf[0].expression, "smile");
+        assert_eq!(perf[0].motion, "Wave");
+        assert_eq!(perf[0].start_ms, 0);
+        assert_eq!(perf[0].duration_ms, project.audio_clips()[0].duration_ms);
+
+        let lipsync_path = out.output_dir.join(
+            perf[0]
+                .lip_sync
+                .as_str()
+                .replace('/', std::path::MAIN_SEPARATOR_STR),
+        );
+        assert!(lipsync_path.is_file(), "{}", lipsync_path.display());
+        let track: crate::lipsync::LipSyncTrack =
+            serde_json::from_str(&std::fs::read_to_string(&lipsync_path).unwrap()).unwrap();
+        assert!(!track.samples.is_empty());
     }
 
     /// `generated/<slug>.old-*` directories still on disk.

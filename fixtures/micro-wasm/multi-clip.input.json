@@ -1,0 +1,8 @@
+{
+  "dialogue_gap_ms": 120,
+  "dialogues": [
+    {"index": 1, "speaker": "reimu", "speaker_display": "霊夢", "text": "最初のクリップ", "audio": "assets/audio/001.wav", "duration_ms": 3410},
+    {"index": 2, "speaker": "marisa", "speaker_display": "魔理沙", "text": "二つ目", "audio": "assets/audio/002.wav", "duration_ms": 3680},
+    {"index": 3, "speaker": "reimu", "speaker_display": "霊夢", "text": "三つ目", "audio": "assets/audio/003.wav", "duration_ms": 955}
+  ]
+}

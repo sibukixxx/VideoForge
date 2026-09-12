@@ -34,6 +34,7 @@ MVP v0.1 の **Core + CLI**（設計書 Phase 1〜6）と Tauri GUI MVP（Phase 
 | YMM4 exporter（Template Patch 方式、Windows path materialize、Windows 限定） | ✅ 合成 fixture でテスト済。**実 YMM4 template での Phase 0 検証は未実施** |
 | Handoff bundle（dir + zip） | ✅ |
 | Tauri GUI（`apps/desktop`: Workspace / Script / Validate / Generate + 進捗 / Preview / Doctor / YMM4 export or bundle） | ✅ MVP。実機での起動確認は `apps/desktop/README.md` のチェックリスト |
+| Character（VOICEVOX + Live2D）: 話者を character manifest にリンクし、名前ベースで VOICEVOX voice を解決、決定論的な lip-sync データを `character_performance` track として timeline に保持。`videoforge character inspect` / `validate` | ✅ P0（音声+lip-syncデータまで）。フレーム描画・preview.mp4 統合は未実装 — 詳細は `docs/character-system.md` |
 
 ## Quick start
 
@@ -67,6 +68,11 @@ videoforge export ymm4 sample-ymm4-bundle/project.vfp.json
 VOICEVOX / FFmpeg なしで配管だけ試す: `videoforge generate scripts/sample.md --fake-tts --no-preview`
 
 ## 台本フォーマット
+
+資料からAIで台本案を作る半自動P0は
+[`docs/script-draft-p0.md`](docs/script-draft-p0.md) を参照。
+`draft prompt` → 外部AI → `draft check` → 人間の確認 → `draft export`。
+API接続・自動公開は行いません。
 
 ```markdown
 ---
@@ -149,6 +155,9 @@ cargo fmt --all --check
 ```
 
 GUI: `cd apps/desktop && pnpm install && pnpm tauri dev`（詳細は `apps/desktop/README.md`）。
+
+Micro-Wasm Phase 0（既存timeline schedulerを共有する小規模実験）は
+[`docs/architecture/micro-wasm.md`](docs/architecture/micro-wasm.md) を参照。Web版やFFmpeg Wasm化ではない。
 
 CI 定義（Windows / macOS / Ubuntu matrix + offline smoke + desktop build）は `docs/ci/github-actions-ci.yml` にある。`.github/workflows/ci.yml` へ移動して有効化する（`docs/ci/README.md` 参照）。
 

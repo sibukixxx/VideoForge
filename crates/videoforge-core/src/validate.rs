@@ -1,14 +1,16 @@
 //! Script validation against the workspace config (design §7.3).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use videoforge_script::{Script, ScriptError};
+use videoforge_character::live2d::{self, Live2dModelInfo};
+use videoforge_script::{Dialogue, Script, ScriptError};
 
+use crate::character::LoadedManifest;
 use crate::directives::{resolve_directives, ResolvedDirective};
 
-use crate::config::{Config, VoiceParams};
+use crate::config::{Config, SpeakerConfig, VoiceParams};
 use crate::error::AppError;
 use crate::workspace::Workspace;
 
@@ -38,6 +40,20 @@ pub struct ResolvedDialogue {
     pub attributes: BTreeMap<String, String>,
     pub voice: VoiceParams,
     pub line: usize,
+    /// Character (design §5) this dialogue performs as, if the speaker links
+    /// one via `SpeakerConfig::character_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_id: Option<String>,
+    /// Resolved `expression=` attribute; `None` means the script did not say
+    /// (a default of `"default"` is applied when the performance clip is
+    /// built, design §12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
+    /// Resolved `motion=` attribute; `None` means the script did not say
+    /// (a default of `"idle"` is applied when the performance clip is
+    /// built, design §12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -117,19 +133,32 @@ pub fn validate_script(
             .push(ValidationIssue::new(Some(w.line), w.message.clone()));
     }
 
+    // Loaded once per validation, not per dialogue: most scripts either use
+    // no character at all (the common case, and this stays `None`) or reuse
+    // the same one or two characters throughout.
+    let character_manifest = match crate::character::load_manifest(config, workspace) {
+        Ok(m) => m,
+        Err(e) => {
+            report
+                .errors
+                .push(ValidationIssue::new(None, e.to_string()));
+            None
+        }
+    };
+    let mut model_cache: HashMap<String, Result<Live2dModelInfo, String>> = HashMap::new();
+
     let known = config.known_speaker_names().join(", ");
     for d in &script.dialogues {
         match config.resolve_speaker(&d.speaker) {
             Some(resolved) => {
-                for key in d.attributes.keys() {
-                    report.warnings.push(ValidationIssue::new(
-                        Some(d.line),
-                        format!(
-                            "attribute `{key}` on `{}` is not supported in v0.1 and is ignored",
-                            d.speaker
-                        ),
-                    ));
-                }
+                let perf = resolve_character_performance(
+                    d,
+                    resolved.key,
+                    resolved.config,
+                    character_manifest.as_ref(),
+                    &mut model_cache,
+                    &mut report,
+                );
                 report.total_chars += d.text.chars().count();
                 report.dialogues.push(ResolvedDialogue {
                     index: d.index,
@@ -139,6 +168,9 @@ pub fn validate_script(
                     attributes: d.attributes.clone(),
                     voice: resolved.config.voice,
                     line: d.line,
+                    character_id: perf.character_id,
+                    expression: perf.expression,
+                    motion: perf.motion,
                 });
             }
             None => report.errors.push(ValidationIssue::new(
@@ -185,6 +217,153 @@ pub fn validate_script(
     }
 
     report
+}
+
+/// What a dialogue's `expression=`/`motion=` attributes resolved to, and
+/// which character (if any) it performs as.
+struct CharacterPerformance {
+    character_id: Option<String>,
+    expression: Option<String>,
+    motion: Option<String>,
+}
+
+/// Validate and resolve one dialogue's character performance attributes
+/// (design §9, §12): unrecognized attributes on a plain speaker keep warning
+/// exactly as before (v0.1 behavior, unchanged); on a speaker linked to a
+/// character, `expression=`/`motion=` are checked against that character's
+/// known list (explicit, or read from its Live2D `model3.json`) instead of
+/// being warned about, and any other attribute still warns.
+fn resolve_character_performance(
+    d: &Dialogue,
+    speaker_key: &str,
+    speaker_config: &SpeakerConfig,
+    character_manifest: Option<&LoadedManifest>,
+    model_cache: &mut HashMap<String, Result<Live2dModelInfo, String>>,
+    report: &mut ValidationReport,
+) -> CharacterPerformance {
+    let warn_unsupported = |report: &mut ValidationReport, key: &str| {
+        report.warnings.push(ValidationIssue::new(
+            Some(d.line),
+            format!(
+                "attribute `{key}` on `{}` is not supported in v0.1 and is ignored",
+                d.speaker
+            ),
+        ));
+    };
+
+    let Some(character_id) = &speaker_config.character_id else {
+        for key in d.attributes.keys() {
+            warn_unsupported(report, key);
+        }
+        return CharacterPerformance {
+            character_id: None,
+            expression: None,
+            motion: None,
+        };
+    };
+
+    // `Config::validate` requires a `character_manifest` whenever any
+    // speaker sets `character_id`; if loading it still failed (bad YAML, I/O
+    // error) that is already a report-level error pushed by the caller, so
+    // just fall through with an unresolved performance rather than
+    // duplicating it here.
+    let Some(loaded) = character_manifest else {
+        return CharacterPerformance {
+            character_id: Some(character_id.clone()),
+            expression: None,
+            motion: None,
+        };
+    };
+
+    let Some(character) = loaded.manifest.find(character_id) else {
+        report.errors.push(ValidationIssue::new(
+            Some(d.line),
+            format!(
+                "speaker `{speaker_key}` links to unknown character `{character_id}` (known characters: {})",
+                loaded.manifest.character_ids().join(", ")
+            ),
+        ));
+        return CharacterPerformance {
+            character_id: Some(character_id.clone()),
+            expression: None,
+            motion: None,
+        };
+    };
+
+    let model_info: Option<Live2dModelInfo> = if let Some(model) = &character.model {
+        let manifest_dir = loaded.path.parent().unwrap_or_else(|| Path::new("."));
+        let result = model_cache.entry(character_id.clone()).or_insert_with(|| {
+            let resolved_path = model.resolve_path(manifest_dir);
+            live2d::load_model3_json(&resolved_path).map_err(|e| e.to_string())
+        });
+        match result {
+            Ok(info) => Some(info.clone()),
+            Err(reason) => {
+                report.errors.push(ValidationIssue::new(
+                    Some(d.line),
+                    format!("character `{character_id}` Live2D model: {reason}"),
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let known_expressions: Vec<&str> = if !character.expressions.is_empty() {
+        character.expressions.iter().map(String::as_str).collect()
+    } else {
+        model_info
+            .as_ref()
+            .map(|i| i.expressions.iter().map(String::as_str).collect())
+            .unwrap_or_default()
+    };
+    let known_motions: Vec<&str> = if !character.motions.is_empty() {
+        character.motions.iter().map(String::as_str).collect()
+    } else {
+        model_info
+            .as_ref()
+            .map(|i| i.motions.iter().map(String::as_str).collect())
+            .unwrap_or_default()
+    };
+
+    let mut expression = None;
+    let mut motion = None;
+    for (key, value) in &d.attributes {
+        match key.as_str() {
+            "expression" => {
+                if !known_expressions.is_empty() && !known_expressions.contains(&value.as_str()) {
+                    report.errors.push(ValidationIssue::new(
+                        Some(d.line),
+                        format!(
+                            "character `{character_id}` has no expression `{value}` (known: {})",
+                            known_expressions.join(", ")
+                        ),
+                    ));
+                }
+                expression = Some(value.clone());
+            }
+            "motion" => {
+                if !known_motions.is_empty() && !known_motions.contains(&value.as_str()) {
+                    report.errors.push(ValidationIssue::new(
+                        Some(d.line),
+                        format!(
+                            "character `{character_id}` has no motion `{value}` (known: {})",
+                            known_motions.join(", ")
+                        ),
+                    ));
+                }
+                motion = Some(value.clone());
+            }
+            other => warn_unsupported(report, other),
+        }
+    }
+
+    CharacterPerformance {
+        character_id: Some(character_id.clone()),
+        expression,
+        motion,
+    }
 }
 
 #[cfg(test)]
@@ -269,5 +448,126 @@ mod tests {
         let report = validate_file(&ws, &cfg, &path);
         assert_eq!(report.errors.len(), 1);
         assert_eq!(report.errors[0].line, Some(1));
+    }
+
+    fn character_workspace() -> (tempfile::TempDir, Workspace, Config) {
+        let dir = tempfile::tempdir().unwrap();
+        init::init(dir.path(), Some("t")).unwrap();
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/character/mock-character/manifest.yaml"
+            ),
+            dir.path().join("characters.yaml"),
+        )
+        .unwrap();
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/character/mock-character/model3.json"
+            ),
+            dir.path().join("model3.json"),
+        )
+        .unwrap();
+        let yaml =
+            "character_manifest: characters.yaml\nspeakers:\n  tsumugi:\n    character_id: mock\n";
+        std::fs::write(dir.path().join("videoforge.yaml"), yaml).unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let cfg = Config::parse(yaml, dir.path()).unwrap();
+        (dir, ws, cfg)
+    }
+
+    #[test]
+    fn character_dialogue_resolves_expression_and_motion() {
+        let (_d, ws, cfg) = character_workspace();
+        let script =
+            videoforge_script::parse_str("tsumugi[expression=smile, motion=Wave]:\nこんにちは\n")
+                .unwrap();
+        let report = validate_script(&script, &cfg, &ws);
+        assert!(report.is_ok(), "{:?}", report.errors);
+        assert_eq!(report.dialogues.len(), 1);
+        let d = &report.dialogues[0];
+        assert_eq!(d.character_id.as_deref(), Some("mock"));
+        assert_eq!(d.expression.as_deref(), Some("smile"));
+        assert_eq!(d.motion.as_deref(), Some("Wave"));
+    }
+
+    #[test]
+    fn character_dialogue_without_attributes_leaves_expression_and_motion_unset() {
+        let (_d, ws, cfg) = character_workspace();
+        let script = videoforge_script::parse_str("tsumugi:\nこんにちは\n").unwrap();
+        let report = validate_script(&script, &cfg, &ws);
+        assert!(report.is_ok(), "{:?}", report.errors);
+        assert_eq!(report.dialogues[0].character_id.as_deref(), Some("mock"));
+        assert_eq!(report.dialogues[0].expression, None);
+        assert_eq!(report.dialogues[0].motion, None);
+    }
+
+    #[test]
+    fn unknown_expression_is_a_validation_error() {
+        let (_d, ws, cfg) = character_workspace();
+        let script =
+            videoforge_script::parse_str("tsumugi[expression=angry]:\nこんにちは\n").unwrap();
+        let report = validate_script(&script, &cfg, &ws);
+        assert!(!report.is_ok());
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.message.contains("no expression") && e.message.contains("angry")));
+    }
+
+    #[test]
+    fn unknown_motion_is_a_validation_error() {
+        let (_d, ws, cfg) = character_workspace();
+        let script =
+            videoforge_script::parse_str("tsumugi[motion=backflip]:\nこんにちは\n").unwrap();
+        let report = validate_script(&script, &cfg, &ws);
+        assert!(!report.is_ok());
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.message.contains("no motion") && e.message.contains("backflip")));
+    }
+
+    #[test]
+    fn unknown_character_id_is_a_validation_error() {
+        let dir = tempfile::tempdir().unwrap();
+        init::init(dir.path(), Some("t")).unwrap();
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/character/mock-character/manifest.yaml"
+            ),
+            dir.path().join("characters.yaml"),
+        )
+        .unwrap();
+        let yaml =
+            "character_manifest: characters.yaml\nspeakers:\n  tsumugi:\n    character_id: ghost\n";
+        std::fs::write(dir.path().join("videoforge.yaml"), yaml).unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let cfg = Config::parse(yaml, dir.path()).unwrap();
+        let script = videoforge_script::parse_str("tsumugi:\nこんにちは\n").unwrap();
+        let report = validate_script(&script, &cfg, &ws);
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.message.contains("unknown character") && e.message.contains("ghost")));
+    }
+
+    #[test]
+    fn plain_speaker_still_warns_on_expression_attribute() {
+        // No character_id linked: expression/motion are just unsupported
+        // attributes, exactly like any other v0.1 attribute (unchanged
+        // behavior for scripts that don't use characters).
+        let (_d, ws, cfg) = workspace();
+        let script = videoforge_script::parse_str("霊夢[expression=smile]:\nやあ\n").unwrap();
+        let report = validate_script(&script, &cfg, &ws);
+        assert!(report.is_ok(), "{:?}", report.errors);
+        assert_eq!(report.dialogues[0].character_id, None);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("attribute `expression`")
+                && w.message.contains("not supported")));
     }
 }
