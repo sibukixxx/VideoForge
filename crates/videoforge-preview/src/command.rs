@@ -514,19 +514,26 @@ impl RenderPlan {
     /// area on whichever edge `subtitle.position` anchors it to.
     /// `overlay_w`/`overlay_h` are resolved by FFmpeg at run time from the
     /// actual scaled sprite, so this does not need to know pixel sizes.
+    ///
+    /// Wrapped in `'...'`: FFmpeg's filter-option tokenizer splits on a bare
+    /// `,` even inside a single option's value (found by actually running
+    /// this through FFmpeg — command-builder tests alone never catch it,
+    /// since `min(max(0,...` "looks like" one option value but parses as
+    /// two). The expression itself never contains a `'`, so a plain wrap is
+    /// enough — no need for `quote_filter_value`'s fuller escaping.
     fn overlay_position_exprs(&self, transform: &Transform) -> (String, String) {
         let safe_area = self.caption_safe_area_px();
         let x = format!(
-            "min(max(0,{:.4}*main_w-overlay_w/2),main_w-overlay_w)",
+            "'min(max(0,{:.4}*main_w-overlay_w/2),main_w-overlay_w)'",
             transform.x
         );
         let y = match self.subtitle.position {
             SubtitlePosition::Bottom => format!(
-                "min(max(0,{:.4}*main_h-overlay_h/2),main_h-{safe_area}-overlay_h)",
+                "'min(max(0,{:.4}*main_h-overlay_h/2),main_h-{safe_area}-overlay_h)'",
                 transform.y
             ),
             SubtitlePosition::Top => format!(
-                "min(max({safe_area},{:.4}*main_h-overlay_h/2),main_h-overlay_h)",
+                "'min(max({safe_area},{:.4}*main_h-overlay_h/2),main_h-overlay_h)'",
                 transform.y
             ),
         };
@@ -549,14 +556,15 @@ impl RenderPlan {
     /// `overlay_position_exprs`, but *without* the caption-safe-area
     /// subtraction: a full-frame diagram or background image is allowed to
     /// occupy the whole frame (captions still draw on top of it regardless,
-    /// since they are composited last).
+    /// since they are composited last). Wrapped in `'...'` for the same
+    /// reason `overlay_position_exprs` is — see its doc comment.
     fn visual_position_exprs(transform: &Transform) -> (String, String) {
         let x = format!(
-            "min(max(0,{:.4}*main_w-overlay_w/2),main_w-overlay_w)",
+            "'min(max(0,{:.4}*main_w-overlay_w/2),main_w-overlay_w)'",
             transform.x
         );
         let y = format!(
-            "min(max(0,{:.4}*main_h-overlay_h/2),main_h-overlay_h)",
+            "'min(max(0,{:.4}*main_h-overlay_h/2),main_h-overlay_h)'",
             transform.y
         );
         (x, y)
@@ -2191,7 +2199,7 @@ mod tests {
             fc.contains("scale=960:540:force_original_aspect_ratio=increase,crop=960:540"),
             "{fc}"
         );
-        assert!(fc.contains("overlay=x=min(max(0,0.2500*main_w-overlay_w/2),main_w-overlay_w)"));
+        assert!(fc.contains("overlay=x='min(max(0,0.2500*main_w-overlay_w/2),main_w-overlay_w)'"));
         assert!(fc.contains("enable='between(t,0.5,1.5)'"));
         assert!(fc.contains("[vis0out]"));
     }

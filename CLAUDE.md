@@ -124,11 +124,19 @@ Captions/text are always composited last so nothing is ever hidden behind them. 
 source is `trim`med to `[trim_start_ms, trim_start_ms + duration_ms)` then `setpts`-shifted so its
 timestamps land on its absolute timeline position — this is what makes a video layer's `t` mean the
 same "absolute timeline seconds" as an image layer's, which the crop/fade expressions above rely on.
-Pan/zoom (`crop=...:eval=frame` referencing `t`, not the `zoompan` filter — see the module doc on
-`RenderPlan::ken_burns_filter` for why) has not been verified against a real FFmpeg in this repo yet
-(see "Known gaps"); an overlapping crossfade between adjacent clips is not implemented (each clip's
-own `"fade"` only ramps its own alpha at its own boundaries, not a coordinated dissolve with its
-neighbor) — "don't build a complex editor" per the P1-5 brief.
+Pan/zoom is `crop=...:eval=frame` referencing `t`, not the `zoompan` filter (see the module doc on
+`RenderPlan::ken_burns_filter` for why); the `"zoom"` half was rendered through a real FFmpeg and
+visually confirmed in `docs/testing/p1-dogfood-e2e.md`, `"slide"` has not been (see "Known gaps"). An
+overlapping crossfade between adjacent clips is not implemented (each clip's own `"fade"` only ramps
+its own alpha at its own boundaries, not a coordinated dissolve with its neighbor) — "don't build a
+complex editor" per the P1-5 brief. **Every `overlay=x=<expr>:y=<expr>` value must be wrapped in
+`'...'`** (`overlay_position_exprs`/`visual_position_exprs`) — FFmpeg's filter-option tokenizer splits
+an option's value on a bare `,`, so an unquoted `min(max(0,...` breaks filtergraph parsing the moment
+a project has more than a background and captions. This shipped broken from P0-1 through P1-2 because
+every test asserted on the generated *string*, never fed it to a real FFmpeg; found and fixed via
+dogfooding (`docs/testing/p1-dogfood-e2e.md`), with a regression test
+(`overlay_position_expressions_parse_in_a_real_filtergraph` in
+`crates/videoforge-preview/tests/ffmpeg_real.rs`) that renders a real character overlay through FFmpeg.
 
 ### Subtitle engine (P1-3)
 
@@ -277,37 +285,51 @@ These span files and are easy to break silently:
   filter graph needs an FFmpeg built with `drawtext` (libfreetype), and `doctor` reports FFmpeg as
   `ok` without checking for it — on such a build `generate` dies with `preview_render_failed`
   ("No such filter: 'drawtext'") after the TTS work is already done.
-- Visual clip compositing (P1-1/P1-2/P1-5) is also command-builder-tested only: the `"fade"`
-  intent's `fade=...:alpha=1` and a `Video` layer's `trim`+`setpts` offsetting follow well-known
-  FFmpeg recipes, but the `"slide"`/`"zoom"` Ken Burns crop expressions (`eval=frame` referencing
-  `t`, `clip(...)`) have not been run against a real FFmpeg from this repo — do that before relying
-  on them. `Video::volume`/`muted` are parsed and stored but the video's own embedded audio track is
-  still not extracted or mixed into the audio graph — P1-4 landed BGM/SE mixing and dialogue ducking
-  (see "Audio engine" above), but a `Video` clip is silent regardless of its own soundtrack; this is
-  the next follow-up. A `Video` clip and a mismatched `png_lipsync` character overlay could both
-  legally claim the same screen position — nothing detects that; it is on the author, same as any
-  other clip authored by hand. BGM ducking's `BGM_DUCK_VOLUME` is a single global constant, not a
-  per-clip or per-config value, and has not been checked against a real FFmpeg render (command-
-  builder-tested only, same caveat as the rest of this list).
-- The subtitle engine (P1-3) is command-builder-tested only, same caveat as the rest of this list —
-  `subtitle.position: top` in particular has not been rendered through a real FFmpeg. Line wrapping
-  (`wrap_text`) is still a naive fixed-character-count hard-wrap (CJK-appropriate, since every glyph
-  is ~1em; a long unbroken Latin word is not treated specially). There is no automatic shrink-to-fit
-  for a caption that is long even after wrapping — an author who sets an extreme `font_scale` or
-  writes a very long line can still push text off the safe area horizontally (only the vertical
-  safe-area/character-overlap axis is structurally enforced). Per-speaker styling (P1-3's
-  "speaker-style") covers only caption text color (`SpeakerConfig::caption_color`); font/size/
-  outline/background remain global (`preview.subtitle`), not per-speaker.
-- Render presets (P1-6) are a fixed catalog of three names — no user-defined preset, and no way to
-  override a single field of a preset (e.g. "youtube-1080p but crf 20") without picking a name and
-  accepting its whole bundle. `EncodeSettings`/`RenderPreset` are command-builder-tested only, same
-  caveat as the rest of this list: none of the three presets' actual encoder output (bitrate/quality
-  in practice) has been checked against a real FFmpeg. Fast preview's (P1-7) `-ss`/`-t` output-side
-  trim is likewise unverified against a real FFmpeg — it is the standard, well-documented technique
-  for trimming a filter_complex output without touching the graph, but this repo has not rendered one.
-  `videoforge preview fast` also has no manifest entry of its own (it does not write or update
-  `manifest.json` at all) and no "selected scene" CLI convenience — a scene has to be turned into a
-  millisecond range by the caller (e.g. from `captions.srt`) before it reaches `--range-ms`.
+- Visual clip compositing (P1-1/P1-2/P1-5): a full real-FFmpeg dogfood run
+  (`docs/testing/p1-dogfood-e2e.md`) rendered a 5.4-minute, 1920×1080 video exercising a
+  background, two `png_lipsync` character overlays, an `@image` with `intent=zoom`, and an
+  `@video` layer with `trim_start_ms`, and visually confirmed all of it composites
+  correctly — this is also what found and fixed the `overlay=x=/y=` quoting bug documented
+  above. Still unverified against a real FFmpeg: the `"slide"` Ken Burns intent (only
+  `"zoom"` was exercised). `Video::volume`/`muted` are parsed and stored but the video's
+  own embedded audio track is still not extracted or mixed into the audio graph — P1-4
+  landed BGM/SE mixing and dialogue ducking (see "Audio engine" above), but a `Video` clip
+  is silent regardless of its own soundtrack; this is the next follow-up (the dogfood video
+  worked around it with `muted=true`). A `Video` clip and a mismatched `png_lipsync`
+  character overlay could both legally claim the same screen position — nothing detects
+  that; it is on the author, same as any other clip authored by hand. BGM ducking's
+  `BGM_DUCK_VOLUME` is a single global constant, not a per-clip or per-config value; the
+  dogfood video's BGM chain (loop/fade-in/fade-out/normalize/ducking) rendered without
+  error but was not byte-level verified against an independent reference (only that the
+  render succeeded and the audio track is valid AAC).
+- The subtitle engine (P1-3): the dogfood run rendered `bottom`-positioned captions with a
+  per-speaker `caption_color`, `subtitle.background`, and `font_scale` through a real
+  FFmpeg with a real CJK font (`ipag.ttf`) and confirmed them legible in extracted frames.
+  `subtitle.position: top` in particular has still not been rendered through a real
+  FFmpeg. Line wrapping (`wrap_text`) is still a naive fixed-character-count hard-wrap
+  (CJK-appropriate, since every glyph is ~1em; a long unbroken Latin word is not treated
+  specially). There is no automatic shrink-to-fit for a caption that is long even after
+  wrapping — an author who sets an extreme `font_scale` or writes a very long line can
+  still push text off the safe area horizontally (only the vertical safe-area/character-
+  overlap axis is structurally enforced). Per-speaker styling (P1-3's "speaker-style")
+  covers only caption text color (`SpeakerConfig::caption_color`); font/size/outline/
+  background remain global (`preview.subtitle`), not per-speaker.
+- Render presets (P1-6) are a fixed catalog of three names — no user-defined preset, and no
+  way to override a single field of a preset (e.g. "youtube-1080p but crf 20") without
+  picking a name and accepting its whole bundle. The dogfood run rendered `youtube-1080p`
+  (`generate --preset`) and `preview-low` (`preview fast --preset`) through a real FFmpeg
+  and confirmed via `ffprobe` that both landed the expected resolution — the actual
+  perceptual bitrate/quality tradeoff of each preset's CRF/encoder-speed choice has not
+  been evaluated by eye or by any metric, only that the encode succeeds. Fast preview's
+  (P1-7) `-ss`/`-t` output-side trim was also confirmed for real: `preview fast
+  --range-ms 50000:95000` produced an exactly-45.000s file (`ffprobe`), landing on the
+  requested window, in 27.5s versus 4m25s for the full render — and a frame pulled from it
+  matched the corresponding point in the full render, confirming the trim does not
+  desynchronize the filter graph's absolute-timeline expressions from the encoded window.
+  `videoforge preview fast` still has no manifest entry of its own (it does not write or
+  update `manifest.json` at all) and no "selected scene" CLI convenience — a scene has to
+  be turned into a millisecond range by the caller (e.g. from `captions.srt`) before it
+  reaches `--range-ms`.
 - The CI workflow is parked in `docs/ci/` because the authoring session could not create files
   under `.github/workflows/`. Enabling it is a `git mv` (see `docs/ci/README.md`).
 - The Tauri GUI (`apps/desktop`) builds and its command layer is unit-tested, but it has not been
