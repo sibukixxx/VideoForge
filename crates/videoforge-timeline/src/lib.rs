@@ -28,7 +28,7 @@ use thiserror::Error;
 use videoforge_project::{
     AudioClip, BackgroundClip, BgmClip, CaptionClip, CharacterClip, CharacterPerformanceClip, Clip,
     ImageClip, Presentation, RelativeAssetPath, SoundEffectClip, SourceInfo, Track, TrackKind,
-    Transform, VideoProject, VideoSettings,
+    Transform, VideoClip, VideoProject, VideoSettings,
 };
 
 /// Default length of a sound effect clip when the script gives none.
@@ -107,6 +107,18 @@ pub enum VisualEventKind {
     SoundEffect {
         source: RelativeAssetPath,
         volume: f32,
+    },
+    /// A general video clip (P1-2) — placed the same way as `Image` (lasts
+    /// until the next `Video` event, or the end of the timeline, unless
+    /// `duration_ms` says otherwise).
+    Video {
+        source: RelativeAssetPath,
+        transform: Transform,
+        presentation: Option<Presentation>,
+        trim_start_ms: u64,
+        volume: f32,
+        muted: bool,
+        looping: bool,
     },
 }
 
@@ -315,6 +327,7 @@ pub fn place_visual_events(
     let mut character = Vec::new();
     let mut bgm = Vec::new();
     let mut se = Vec::new();
+    let mut video = Vec::new();
     for (i, (event, &start)) in events.iter().zip(&starts).enumerate() {
         let default_end = match &event.kind {
             VisualEventKind::Image { .. } => {
@@ -328,6 +341,9 @@ pub fn place_visual_events(
                 next_start(i, &|k| matches!(k, VisualEventKind::Bgm { .. })).unwrap_or(total_ms)
             }
             VisualEventKind::SoundEffect { .. } => start + DEFAULT_SOUND_EFFECT_MS,
+            VisualEventKind::Video { .. } => {
+                next_start(i, &|k| matches!(k, VisualEventKind::Video { .. })).unwrap_or(total_ms)
+            }
         };
         let end = event
             .duration_ms
@@ -388,6 +404,27 @@ pub fn place_visual_events(
                     extra,
                 }))
             }
+            VisualEventKind::Video {
+                source,
+                transform,
+                presentation,
+                trim_start_ms,
+                volume,
+                muted,
+                looping,
+            } => video.push(Clip::Video(VideoClip {
+                id: format!("video-{:03}", video.len() + 1),
+                source,
+                start_ms: start,
+                duration_ms,
+                trim_start_ms,
+                volume,
+                muted,
+                looping,
+                transform,
+                presentation,
+                extra,
+            })),
         }
     }
 
@@ -396,6 +433,7 @@ pub fn place_visual_events(
         ("character", TrackKind::Character, character),
         ("bgm", TrackKind::Bgm, bgm),
         ("se", TrackKind::SoundEffect, se),
+        ("video", TrackKind::Video, video),
     ]
     .into_iter()
     .filter(|(_, _, clips)| !clips.is_empty())
@@ -551,6 +589,61 @@ mod tests {
             spans,
             vec![("image-001", 0, 2400), ("image-002", 2400, 1000)]
         );
+    }
+
+    fn video(anchor: usize, path: &str, duration_ms: Option<u64>) -> VisualEvent {
+        VisualEvent {
+            anchor_dialogue_index: anchor,
+            duration_ms,
+            kind: VisualEventKind::Video {
+                source: asset(path),
+                transform: Transform::default(),
+                presentation: None,
+                trim_start_ms: 0,
+                volume: 1.0,
+                muted: false,
+                looping: false,
+            },
+        }
+    }
+
+    #[test]
+    fn video_lasts_until_the_next_video_or_the_end_of_the_timeline() {
+        let project = three_dialogues(vec![
+            video(1, "assets/video/a.mp4", None),
+            video(3, "assets/video/b.mp4", None),
+        ]);
+        let spans: Vec<(&str, u64, u64)> = project
+            .video_clips()
+            .iter()
+            .map(|c| (c.id.as_str(), c.start_ms, c.duration_ms))
+            .collect();
+        assert_eq!(
+            spans,
+            vec![("video-001", 0, 2400), ("video-002", 2400, 1000)]
+        );
+    }
+
+    #[test]
+    fn video_clip_carries_trim_volume_muted_and_looping() {
+        let project = three_dialogues(vec![VisualEvent {
+            anchor_dialogue_index: 1,
+            duration_ms: Some(500),
+            kind: VisualEventKind::Video {
+                source: asset("assets/video/a.mp4"),
+                transform: Transform::default(),
+                presentation: None,
+                trim_start_ms: 1500,
+                volume: 0.4,
+                muted: true,
+                looping: true,
+            },
+        }]);
+        let v = &project.video_clips()[0];
+        assert_eq!(v.trim_start_ms, 1500);
+        assert_eq!(v.volume, 0.4);
+        assert!(v.muted);
+        assert!(v.looping);
     }
 
     #[test]

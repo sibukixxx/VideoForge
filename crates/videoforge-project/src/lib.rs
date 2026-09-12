@@ -21,8 +21,8 @@ pub use path::{PathError, RelativeAssetPath};
 pub use presentation::{Presentation, KNOWN_INTENTS, KNOWN_ROLES};
 pub use project::{
     AudioClip, BackgroundClip, BgmClip, CaptionClip, CharacterClip, CharacterPerformanceClip, Clip,
-    FitMode, ImageClip, ProjectError, SoundEffectClip, SourceInfo, Track, TrackKind, Transform,
-    VideoProject, VideoSettings, SCHEMA_VERSION,
+    CropRect, FitMode, ImageClip, ProjectError, SoundEffectClip, SourceInfo, TextClip, Track,
+    TrackKind, Transform, VideoClip, VideoProject, VideoSettings, SCHEMA_VERSION,
 };
 pub use time::{format_srt_timestamp, format_timespan, frame_to_millis, millis_to_frame};
 pub use validation::{

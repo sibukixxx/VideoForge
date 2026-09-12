@@ -349,7 +349,7 @@ async fn run_pipeline(
         None => None,
     };
 
-    // --- Directive assets (image / character / bgm / se) -----------------
+    // --- Directive assets (image / character / bgm / se / video) ---------
     // Copied under the same workspace-relative path so the project's asset
     // paths are valid both in the workspace and in generated/<slug>/.
     // Missing assets were already reported as warnings by validation.

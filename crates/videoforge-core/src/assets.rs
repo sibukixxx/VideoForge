@@ -127,6 +127,8 @@ fn kind_for_clip(clip: &Clip) -> Option<AssetKind> {
         Clip::Bgm(_) => Some(AssetKind::Bgm),
         Clip::SoundEffect(_) => Some(AssetKind::SoundEffect),
         Clip::CharacterPerformance(_) => Some(AssetKind::Generated),
+        Clip::Video(_) => Some(AssetKind::Video),
+        Clip::Text(_) => None,
     }
 }
 

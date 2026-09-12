@@ -223,6 +223,8 @@ fn clip_kind(clip: &Clip) -> TrackKind {
         Clip::Bgm(_) => TrackKind::Bgm,
         Clip::SoundEffect(_) => TrackKind::SoundEffect,
         Clip::CharacterPerformance(_) => TrackKind::CharacterPerformance,
+        Clip::Video(_) => TrackKind::Video,
+        Clip::Text(_) => TrackKind::Text,
     }
 }
 
@@ -236,6 +238,8 @@ fn kind_name(kind: TrackKind) -> &'static str {
         TrackKind::SoundEffect => "sound_effect",
         TrackKind::Bgm => "bgm",
         TrackKind::CharacterPerformance => "character_performance",
+        TrackKind::Video => "video",
+        TrackKind::Text => "text",
     }
 }
 

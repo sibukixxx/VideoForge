@@ -449,7 +449,7 @@ mod tests {
             vec![
                 &ValidationIssue::new(
                     Some(1),
-                    "`role=hero` on `@image` is not a recommended role (known: primary_visual, supporting_visual, diagram, character, background, callout, comparison, emphasis); it is kept as written"
+                    "`role=hero` on `@image` is not a recommended role (known: primary_visual, supporting_visual, diagram, character, background, callout, comparison, emphasis, overlay); it is kept as written"
                 ),
                 &ValidationIssue::new(
                     Some(1),

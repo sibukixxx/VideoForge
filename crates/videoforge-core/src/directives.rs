@@ -59,6 +59,7 @@ pub fn resolve_directives(
             DirectiveKind::Image { path, attributes } => ("@image", path.clone(), attributes),
             DirectiveKind::Bgm { path, attributes } => ("@bgm", path.clone(), attributes),
             DirectiveKind::Se { path, attributes } => ("@se", path.clone(), attributes),
+            DirectiveKind::Video { path, attributes } => ("@video", path.clone(), attributes),
             DirectiveKind::Character { name, attributes } => (
                 "@character",
                 character_path(name, attributes, config),
@@ -79,7 +80,9 @@ pub fn resolve_directives(
         let mut attrs = Attributes::new(name, d.line, attributes, &mut out.warnings);
         let duration_ms = attrs.u64("duration_ms");
         let kind = match &d.kind {
-            DirectiveKind::Image { .. } | DirectiveKind::Character { .. } => {
+            DirectiveKind::Image { .. }
+            | DirectiveKind::Character { .. }
+            | DirectiveKind::Video { .. } => {
                 let transform = attrs.transform();
                 let presentation = attrs.presentation();
                 let speaker = match &d.kind {
@@ -95,14 +98,24 @@ pub fn resolve_directives(
             _ => (None, Transform::default(), None),
         };
         let volume = match &d.kind {
-            DirectiveKind::Bgm { .. } | DirectiveKind::Se { .. } => {
+            DirectiveKind::Bgm { .. } | DirectiveKind::Se { .. } | DirectiveKind::Video { .. } => {
                 attrs.f32("volume").unwrap_or(1.0)
             }
             _ => 1.0,
         };
         let looping = match &d.kind {
-            DirectiveKind::Bgm { .. } => attrs.bool("loop").unwrap_or(false),
+            DirectiveKind::Bgm { .. } | DirectiveKind::Video { .. } => {
+                attrs.bool("loop").unwrap_or(false)
+            }
             _ => false,
+        };
+        let muted = match &d.kind {
+            DirectiveKind::Video { .. } => attrs.bool("muted").unwrap_or(false),
+            _ => false,
+        };
+        let trim_start_ms = match &d.kind {
+            DirectiveKind::Video { .. } => attrs.u64("trim_start_ms").unwrap_or(0),
+            _ => 0,
         };
         attrs.finish();
 
@@ -158,6 +171,15 @@ pub fn resolve_directives(
                 source: source.clone(),
                 volume,
             },
+            DirectiveKind::Video { .. } => VisualEventKind::Video {
+                source: source.clone(),
+                transform,
+                presentation,
+                trim_start_ms,
+                volume,
+                muted,
+                looping,
+            },
             DirectiveKind::Transition { .. } => unreachable!("collected above"),
         };
         out.directives.push(ResolvedDirective {
@@ -172,8 +194,8 @@ pub fn resolve_directives(
         });
     }
 
-    // `@transition <name>` becomes the intent of every image / character
-    // that starts with the same dialogue.
+    // `@transition <name>` becomes the intent of every image / character /
+    // video that starts with the same dialogue.
     for t in transitions {
         let DirectiveKind::Transition { name, attributes } = &t.kind else {
             continue;
@@ -192,7 +214,8 @@ pub fn resolve_directives(
             }
             let presentation = match &mut r.event.kind {
                 VisualEventKind::Image { presentation, .. }
-                | VisualEventKind::Character { presentation, .. } => presentation,
+                | VisualEventKind::Character { presentation, .. }
+                | VisualEventKind::Video { presentation, .. } => presentation,
                 _ => continue,
             };
             let p = presentation.get_or_insert_with(Presentation::default);
@@ -442,6 +465,58 @@ mod tests {
                     },
                 },
             }]
+        );
+    }
+
+    #[test]
+    fn video_with_attributes_becomes_an_anchored_event() {
+        let (_d, ws, cfg) = workspace();
+        touch(&ws, "assets/video/clip.mp4");
+        let r = resolve(
+            &ws,
+            &cfg,
+            "@video assets/video/clip.mp4[volume=0.5, loop=true, muted=false, trim_start_ms=200, x=0.5]\n霊夢:\nやあ\n",
+        );
+        assert_eq!(r.errors, vec![]);
+        assert_eq!(r.warnings, vec![]);
+        assert_eq!(
+            r.directives,
+            vec![ResolvedDirective {
+                line: 1,
+                source: RelativeAssetPath::new("assets/video/clip.mp4").unwrap(),
+                exists: true,
+                event: VisualEvent {
+                    anchor_dialogue_index: 1,
+                    duration_ms: None,
+                    kind: VisualEventKind::Video {
+                        source: RelativeAssetPath::new("assets/video/clip.mp4").unwrap(),
+                        transform: Transform::default(),
+                        presentation: None,
+                        trim_start_ms: 200,
+                        volume: 0.5,
+                        muted: false,
+                        looping: true,
+                    },
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn transition_applies_to_video_too() {
+        let (_d, ws, cfg) = workspace();
+        touch(&ws, "assets/video/clip.mp4");
+        let r = resolve(
+            &ws,
+            &cfg,
+            "@video assets/video/clip.mp4\n@transition zoom\n霊夢:\nやあ\n",
+        );
+        let VisualEventKind::Video { presentation, .. } = &r.directives[0].event.kind else {
+            panic!("video expected");
+        };
+        assert_eq!(
+            presentation.as_ref().unwrap().intent.as_deref(),
+            Some("zoom")
         );
     }
 

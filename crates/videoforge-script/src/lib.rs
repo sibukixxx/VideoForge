@@ -14,8 +14,8 @@
 //!   full-width colon) starts a new dialogue.
 //! * Following non-empty lines are the dialogue text (joined with `\n`).
 //! * `#` heading lines are comments.
-//! * `@image` / `@character` / `@bgm` / `@se` / `@transition` lines are
-//!   presentation directives (issue #17). They take one argument and the same
+//! * `@image` / `@character` / `@bgm` / `@se` / `@video` / `@transition` lines
+//!   are presentation directives (issue #17, P1-2). They take one argument and the same
 //!   optional `[key=value, ...]` suffix as speaker headers:
 //!
 //!   ```markdown
@@ -121,6 +121,11 @@ pub enum DirectiveKind {
     },
     /// `@se <path>[…]` — a sound effect.
     Se {
+        path: String,
+        attributes: BTreeMap<String, String>,
+    },
+    /// `@video <path>[…]` — a video clip (P1-2).
+    Video {
         path: String,
         attributes: BTreeMap<String, String>,
     },
@@ -384,6 +389,9 @@ fn parse_directive(
         "se" => ("@se assets/se/x.wav", |path, attributes| {
             DirectiveKind::Se { path, attributes }
         }),
+        "video" => ("@video assets/video/x.mp4", |path, attributes| {
+            DirectiveKind::Video { path, attributes }
+        }),
         "transition" => ("@transition fade", |name, attributes| {
             DirectiveKind::Transition { name, attributes }
         }),
@@ -628,6 +636,30 @@ mod tests {
                     attributes: attrs(&[("duration_ms", "300")]),
                 },
             ]
+        );
+        assert!(s.warnings.is_empty(), "{:?}", s.warnings);
+    }
+
+    #[test]
+    fn video_directive_is_parsed_with_path_and_attributes() {
+        let s = parse_str(
+            "@video assets/video/clip.mp4[volume=0.8, loop=true, trim_start_ms=500]\n霊夢:\nやあ\n",
+        )
+        .unwrap();
+        assert_eq!(
+            s.directives,
+            vec![ScriptDirective {
+                line: 1,
+                anchor_dialogue_index: Some(1),
+                kind: DirectiveKind::Video {
+                    path: "assets/video/clip.mp4".into(),
+                    attributes: attrs(&[
+                        ("volume", "0.8"),
+                        ("loop", "true"),
+                        ("trim_start_ms", "500")
+                    ]),
+                },
+            }]
         );
         assert!(s.warnings.is_empty(), "{:?}", s.warnings);
     }

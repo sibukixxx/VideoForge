@@ -26,9 +26,19 @@ pub const KNOWN_ROLES: &[&str] = &[
     "callout",
     "comparison",
     "emphasis",
+    // An overlay (watermark, lower-third, logo) — see `Clip`'s doc comment
+    // for why this is an `ImageClip` with this role, not a separate
+    // "OverlayClip" type (P1-1).
+    "overlay",
 ];
 
-/// Recommended `intent` vocabulary.
+/// Recommended `intent` vocabulary. `videoforge-preview` (P1-5) renders
+/// `"fade"` as an alpha ramp over `intent_duration_ms` at the clip's
+/// start/end, `"slide"`/`"zoom"` as a Ken Burns-style pan/zoom across the
+/// clip's own `duration_ms` (no separate "pan" word — a slide *is* a pan),
+/// and `"cut"`/`"emphasis"`/anything else as a plain cut (P1-5's own
+/// "don't build a complex editor" scope: only what plays back the same way
+/// every time from `project.vfp.json` alone, no manual keyframing).
 pub const KNOWN_INTENTS: &[&str] = &["fade", "slide", "zoom", "emphasis", "cut"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
