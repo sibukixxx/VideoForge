@@ -390,6 +390,8 @@ pub async fn generate(
             srt_include_speaker: request.srt_speaker,
             cancel: cancel.clone(),
             keep_tmp_on_failure: false,
+            render_preset: None,
+            preview_range_ms: None,
         };
         let out = core_generate::generate(&ws, &path, options, deps).await?;
         Ok::<_, CommandError>(GeneratedInfo {
