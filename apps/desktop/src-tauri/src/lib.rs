@@ -19,6 +19,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::platform_info,
             commands::doctor,
+            commands::preflight,
             commands::create_workspace,
             commands::open_workspace,
             commands::read_script,
