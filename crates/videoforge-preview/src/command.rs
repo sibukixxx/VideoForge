@@ -634,12 +634,10 @@ impl RenderPlan {
         let progress = format!("clip((t-{start_sec})/{dur_sec}\\,0\\,1)");
         match intent {
             "zoom" => Some(format!(
-                "crop=w='iw*(1-{zf}*{progress})':h='ih*(1-{zf}*{progress})':x='(in_w-out_w)/2':y='(in_h-out_h)/2'",
-                zf = ZOOM_IN_FRACTION,
+                "crop=w='iw*(1-{ZOOM_IN_FRACTION}*{progress})':h='ih*(1-{ZOOM_IN_FRACTION}*{progress})':x='(in_w-out_w)/2':y='(in_h-out_h)/2'",
             )),
             "slide" => Some(format!(
-                "crop=w='iw*{pf}':h='ih*{pf}':x='(in_w-out_w)*{progress}':y='(in_h-out_h)/2'",
-                pf = PAN_CROP_FRACTION,
+                "crop=w='iw*{PAN_CROP_FRACTION}':h='ih*{PAN_CROP_FRACTION}':x='(in_w-out_w)*{progress}':y='(in_h-out_h)/2'",
             )),
             _ => None,
         }
@@ -683,7 +681,7 @@ impl RenderPlan {
         if rotation_deg == 0.0 {
             return Vec::new();
         }
-        let rad = format!("{:.6}*PI/180", rotation_deg);
+        let rad = format!("{rotation_deg:.6}*PI/180");
         vec![
             "format=rgba".to_string(),
             format!("rotate={rad}:ow=rotw({rad}):oh=roth({rad}):c=none"),
@@ -1085,8 +1083,7 @@ impl RenderPlan {
                 .collect::<Vec<_>>()
                 .join("+");
             chain.push(format!(
-                "volume=eval=frame:volume='if({duck_expr}\\,{:.4}\\,1)'",
-                BGM_DUCK_VOLUME
+                "volume=eval=frame:volume='if({duck_expr}\\,{BGM_DUCK_VOLUME:.4}\\,1)'"
             ));
         }
         chain
@@ -2594,8 +2591,7 @@ mod tests {
         // project(false) dialogue: (0,3410) and (3610,7290) -> end = start+duration
         assert!(
             fc.contains(&format!(
-                "volume=eval=frame:volume='if(between(t,0,3.41)+between(t,3.61,7.29)\\,{:.4}\\,1)'",
-                BGM_DUCK_VOLUME
+                "volume=eval=frame:volume='if(between(t,0,3.41)+between(t,3.61,7.29)\\,{BGM_DUCK_VOLUME:.4}\\,1)'"
             )),
             "{fc}"
         );

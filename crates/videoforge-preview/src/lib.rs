@@ -250,34 +250,6 @@ impl PreviewRenderer for FfmpegPreviewRenderer {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_ffmpeg_filter_and_encoder_listings() {
-        let listing = " Filters:\n T.. = Timeline support\n ... drawtext         V->V\n TS. overlay          VV->V\n V..... libx264       H.264 encoder\n A..... aac           AAC encoder\n";
-        assert_eq!(
-            parse_listing_names(listing),
-            ["drawtext", "overlay", "libx264", "aac"]
-        );
-    }
-
-    #[test]
-    fn reports_each_missing_required_capability() {
-        let capabilities = FfmpegCapabilities {
-            filters: FfmpegCapabilities::REQUIRED_FILTERS
-                .iter()
-                .filter(|value| **value != "drawtext")
-                .map(|value| (*value).to_string())
-                .collect(),
-            encoders: vec!["aac".into()],
-        };
-        let missing = capabilities.missing_required();
-        assert_eq!(missing, ["filter:drawtext", "encoder:libx264"]);
-    }
-}
-
 fn scratch_dir(output: &Path) -> PathBuf {
     let name = output
         .file_name()
@@ -338,4 +310,32 @@ async fn run_ffmpeg(
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ffmpeg_filter_and_encoder_listings() {
+        let listing = " Filters:\n T.. = Timeline support\n ... drawtext         V->V\n TS. overlay          VV->V\n V..... libx264       H.264 encoder\n A..... aac           AAC encoder\n";
+        assert_eq!(
+            parse_listing_names(listing),
+            ["drawtext", "overlay", "libx264", "aac"]
+        );
+    }
+
+    #[test]
+    fn reports_each_missing_required_capability() {
+        let capabilities = FfmpegCapabilities {
+            filters: FfmpegCapabilities::REQUIRED_FILTERS
+                .iter()
+                .filter(|value| **value != "drawtext")
+                .map(|value| (*value).to_string())
+                .collect(),
+            encoders: vec!["aac".into()],
+        };
+        let missing = capabilities.missing_required();
+        assert_eq!(missing, ["filter:drawtext", "encoder:libx264"]);
+    }
 }

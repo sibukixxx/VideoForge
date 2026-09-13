@@ -103,12 +103,14 @@ pub fn resolve_speaker_profiles_from_list(
         let (resolved_voice, character, legacy_unpinned_voice) = if let Some(character_id) =
             &speaker_cfg.character_id
         {
-            let loaded = loaded_manifest.as_ref().ok_or_else(|| AppError::InvalidConfig {
-                path: workspace.root().join("videoforge.yaml"),
-                reason: format!(
+            let loaded = loaded_manifest
+                .as_ref()
+                .ok_or_else(|| AppError::InvalidConfig {
+                    path: workspace.root().join("videoforge.yaml"),
+                    reason: format!(
                     "speakers.{key}.character_id is set but character_manifest could not be loaded"
                 ),
-            })?;
+                })?;
             let character =
                 loaded
                     .manifest
