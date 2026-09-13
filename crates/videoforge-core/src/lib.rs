@@ -23,6 +23,7 @@ pub mod init;
 pub mod lipsync;
 pub mod manifest;
 pub mod preset;
+pub mod preflight;
 pub mod preview;
 pub mod progress;
 pub mod speaker_profile;

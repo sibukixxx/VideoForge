@@ -53,6 +53,7 @@ cargo install --path crates/videoforge-cli   # または cargo build --release
 videoforge init my-channel
 cd my-channel
 videoforge doctor                       # VOICEVOX / FFmpeg / platform capability を確認
+videoforge preflight scripts/sample.md  # 対象台本・話者・素材・出力容量を生成前に確認
 videoforge speakers                     # speaker_id (VOICEVOX style id) を確認して videoforge.yaml に反映
 videoforge validate scripts/sample.md
 videoforge generate scripts/sample.md   # → generated/sample/
@@ -60,6 +61,8 @@ videoforge generate scripts/sample.md   # → generated/sample/
 
 `doctor` はFFmpegの存在だけでなく、preview生成で使うfilterと既定encoderも確認する。
 例えばlibfreetypeなしで `drawtext` を持たないFFmpegは、TTS開始前に警告される。
+対象動画固有の診断とmachine-readable JSONについては
+[`docs/testing/preflight.md`](docs/testing/preflight.md)を参照。
 
 Windows で YMM4 プロジェクトにする:
 

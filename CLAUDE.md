@@ -297,8 +297,9 @@ These span files and are easy to break silently:
   `drawtext`, `overlay`, `amix`, `libx264`, and `aac`) before `doctor` reports it available. A build
   without libfreetype therefore produces an FFmpeg warning before TTS work rather than a late
   `preview_render_failed`. This remains an environment-level check: `doctor` still has no script
-  argument, so project-specific asset enumeration and duration/size estimation belong to #47's
-  next preflight slice.
+  argument. Project-specific script/IR validation, asset enumeration, speaker identity, and
+  duration/size estimation are provided separately by `videoforge preflight <target>`; see
+  `docs/testing/preflight.md`.
 - Visual clip compositing (P1-1/P1-2/P1-5): two real-FFmpeg dogfood rounds
   (`docs/testing/p1-dogfood-e2e.md`) have now exercised background + two `png_lipsync`
   character overlays + an `@image` with both `intent=zoom` and `intent=slide` + a `@video`

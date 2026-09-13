@@ -1,7 +1,7 @@
 //! `videoforge` CLI (design §7). The CLI is the primary agent interface:
 //! files in, files out, stable exit codes.
 //!
-//! Exit codes: 0 ok · 1 error · 2 validation failed / doctor failures.
+//! Exit codes: 0 ok · 1 error · 2 validation/preflight failure · 3 preflight warning.
 
 mod commands;
 mod interchange_commands;
@@ -47,6 +47,13 @@ enum Command {
     },
     /// Check workspace, VOICEVOX, FFmpeg, output directory, template and platform capabilities
     Doctor(TtsArgs),
+    /// Check whether one script or project.vfp.json is ready before expensive work
+    Preflight {
+        /// Script Markdown or canonical project.vfp.json
+        target: PathBuf,
+        #[command(flatten)]
+        tts: TtsArgs,
+    },
     /// Parse a script and resolve speakers without generating anything
     Validate {
         /// Script path (scripts/xxx.md)
@@ -242,6 +249,9 @@ async fn main() -> ExitCode {
         Command::Draft { action } => commands::draft(&ctx, action),
         Command::Init { dir, name } => commands::init(&ctx, dir, name),
         Command::Doctor(tts) => commands::doctor(&ctx, tts.fake_tts, tts.endpoint).await,
+        Command::Preflight { target, tts } => {
+            commands::preflight(&ctx, target, tts.fake_tts, tts.endpoint).await
+        }
         Command::Validate { script } => commands::validate(&ctx, script),
         Command::Generate {
             script,

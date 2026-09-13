@@ -9,6 +9,7 @@ use videoforge_character::{CharacterManifest, PROVIDER_VOICEVOX};
 use videoforge_core::doctor::{self, CheckStatus, DoctorInput};
 use videoforge_core::export::{ExportRequest, ProjectExporter};
 use videoforge_core::preview::PreviewRenderer;
+use videoforge_core::preflight::{self, PreflightStatus};
 use videoforge_core::progress::{FnProgress, GenerationStage};
 use videoforge_core::project::VideoProject;
 use videoforge_core::tts::{FakeTtsEngine, Speaker, TtsCache, TtsEngine};
@@ -239,6 +240,84 @@ pub async fn doctor(
         );
     }
     exit(if report.has_failures() { 2 } else { 0 })
+}
+
+// ---------------------------------------------------------------- preflight
+
+pub async fn preflight(
+    ctx: &Context,
+    target: PathBuf,
+    fake_tts: bool,
+    endpoint: Option<String>,
+) -> anyhow::Result<ExitCode> {
+    let ws = ctx.workspace_for(Some(&target))?;
+    let cfg = ws.load_config()?;
+    let endpoint = endpoint.unwrap_or_else(|| cfg.tts.endpoint.clone());
+    let tts = make_tts(
+        fake_tts,
+        &endpoint,
+        cfg.tts.timeout_secs,
+        cfg.tts.allow_remote_endpoint,
+    )?;
+    let target = resolve_preflight_target(&ws, &target)?;
+    let report = preflight::run(&ws, &target, tts.as_ref()).await?;
+
+    if ctx.json {
+        ctx.emit_json(&report)?;
+    } else {
+        println!("Target: {} ({})", report.target, report.target_kind);
+        for item in &report.checks {
+            let mark = match item.status {
+                PreflightStatus::Pass => "✓",
+                PreflightStatus::Warning => "!",
+                PreflightStatus::Failure => "✗",
+            };
+            let path = item
+                .path
+                .as_deref()
+                .map(|value| format!(" [{value}]"))
+                .unwrap_or_default();
+            println!("{mark} {}{path}: {}", item.code, item.detail);
+            if let Some(remediation) = &item.remediation {
+                println!("  fix: {remediation}");
+            }
+        }
+        if let Some(duration_ms) = report.duration_ms {
+            println!("Estimated duration: {:.1}s", duration_ms as f64 / 1000.0);
+        }
+        if let Some(bytes) = report.estimated_output_bytes {
+            println!("Estimated output: {} MiB", bytes / 1_048_576);
+        }
+        println!("Result: {:?}", report.status());
+    }
+
+    exit(match report.status() {
+        PreflightStatus::Pass => 0,
+        PreflightStatus::Failure => 2,
+        PreflightStatus::Warning => 3,
+    })
+}
+
+fn resolve_preflight_target(ws: &Workspace, target: &Path) -> anyhow::Result<PathBuf> {
+    if target.is_file() {
+        return Ok(target.to_path_buf());
+    }
+    if target.is_dir() {
+        let project = target.join("project.vfp.json");
+        if project.is_file() {
+            return Ok(project);
+        }
+    }
+    if let Ok(in_workspace) = ws.resolve(&target.to_string_lossy()) {
+        if in_workspace.is_file() {
+            return Ok(in_workspace);
+        }
+        let project = in_workspace.join("project.vfp.json");
+        if project.is_file() {
+            return Ok(project);
+        }
+    }
+    Err(anyhow!("preflight target not found: {}", target.display()))
 }
 
 // ---------------------------------------------------------------- speakers

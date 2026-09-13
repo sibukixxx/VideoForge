@@ -18,6 +18,7 @@ use videoforge_core::export::{ExportRequest, ProjectExporter};
 use videoforge_core::generate::{MANIFEST_FILE, PREVIEW_FILE, PROJECT_FILE};
 use videoforge_core::manifest::Manifest;
 use videoforge_core::preview::PreviewRenderer;
+use videoforge_core::preflight::{self, PreflightReport};
 use videoforge_core::progress::{GenerationStage, ProgressSink};
 use videoforge_core::project::VideoProject;
 use videoforge_core::tts::{FakeTtsEngine, TtsCache, TtsEngine};
@@ -170,6 +171,36 @@ pub async fn doctor(
         platform: platform.as_ref(),
     })
     .await)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn preflight(
+    workspace: String,
+    target: String,
+    fake_tts: bool,
+    endpoint: Option<String>,
+) -> CommandResult<PreflightReport> {
+    let ws = Workspace::open(&workspace)?;
+    let cfg = ws.load_config()?;
+    let endpoint = endpoint.unwrap_or_else(|| cfg.tts.endpoint.clone());
+    let tts = make_tts(
+        fake_tts,
+        &endpoint,
+        cfg.tts.timeout_secs,
+        cfg.tts.allow_remote_endpoint,
+    )?;
+    let mut target_path = ws.resolve(&target)?;
+    if target_path.is_dir() {
+        target_path = target_path.join(PROJECT_FILE);
+    }
+    if !target_path.is_file() {
+        return Err(AppError::InvalidWorkspacePath {
+            path: target,
+            reason: "preflight target is not a file".into(),
+        }
+        .into());
+    }
+    Ok(preflight::run(&ws, &target_path, tts.as_ref()).await?)
 }
 
 // ---------------------------------------------------------------- workspace
@@ -359,6 +390,8 @@ pub async fn generate(
             srt_include_speaker: request.srt_speaker,
             cancel: cancel.clone(),
             keep_tmp_on_failure: false,
+            render_preset: None,
+            preview_range_ms: None,
         };
         let out = core_generate::generate(&ws, &path, options, deps).await?;
         Ok::<_, CommandError>(GeneratedInfo {
