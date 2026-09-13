@@ -57,6 +57,25 @@ fn full_pipeline_offline() {
     assert_eq!(code, 0, "{stdout}");
     assert!(stdout.contains("Dialogues: 3"));
 
+    let (code, stdout, stderr) = run(
+        &ws,
+        &[
+            "preflight",
+            "scripts/001-ai-news.md",
+            "--fake-tts",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 3, "{stdout}{stderr}");
+    let preflight: serde_json::Value = serde_json::from_str(&stdout).expect(&stderr);
+    assert_eq!(preflight["target_kind"], "script");
+    assert_eq!(preflight["status"], "warning");
+    assert!(preflight["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["code"] == "tts_unverified"));
+
     let (code, stdout, stderr) = run(&ws, &["doctor", "--fake-tts", "--json"]);
     let doctor: serde_json::Value = serde_json::from_str(&stdout).expect(&stderr);
     assert_eq!(code, 0, "{stdout}{stderr}");
@@ -90,6 +109,26 @@ fn full_pipeline_offline() {
     assert_eq!(manifest["source"], "scripts/001-ai-news.md");
     assert_eq!(manifest["dialogues"], 3);
     assert!(manifest["preview"].is_null());
+
+    let (code, stdout, stderr) = run(
+        &ws,
+        &[
+            "preflight",
+            "generated/001-ai-news/project.vfp.json",
+            "--fake-tts",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 3, "{stdout}{stderr}");
+    let preflight: serde_json::Value = serde_json::from_str(&stdout).expect(&stderr);
+    assert_eq!(preflight["target_kind"], "project");
+    assert_eq!(preflight["status"], "warning");
+    assert!(preflight["duration_ms"].as_u64().unwrap() > 0);
+    assert!(!preflight["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["status"] == "failure"));
 
     // second run hits the cache
     let (code, _, stderr) = run(
