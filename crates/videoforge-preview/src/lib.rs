@@ -135,7 +135,10 @@ fn parse_listing_names(listing: &str) -> Vec<String> {
             let mut fields = line.split_whitespace();
             let flags = fields.next()?;
             let name = fields.next()?;
-            if flags.chars().all(|c| c == '.' || c.is_ascii_uppercase()) {
+            // Header legend lines ("T.. = Timeline support") share the same
+            // flags-then-token shape as a real entry, but their second token
+            // is always the literal "=" — no filter/encoder is ever named that.
+            if name != "=" && flags.chars().all(|c| c == '.' || c.is_ascii_uppercase()) {
                 Some(name.to_string())
             } else {
                 None
