@@ -1046,7 +1046,7 @@ mod tests {
     #[async_trait::async_trait]
     impl TtsEngine for VersionlessEngine {
         fn id(&self) -> &str {
-            "versionless"
+            self.0.id()
         }
         async fn health(&self) -> Result<crate::tts::EngineInfo, AppError> {
             Err(AppError::Other("no /version endpoint".into()))
