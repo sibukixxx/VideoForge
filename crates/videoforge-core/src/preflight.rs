@@ -10,6 +10,7 @@ use videoforge_project::VideoProject;
 
 use crate::assets::build_registry;
 use crate::tts::TtsEngine;
+use crate::presentation::{self, DiagnosticLevel, MarpCli, PresentationRenderer};
 use crate::{character, validate, AppError, Workspace};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,14 +98,117 @@ pub async fn run(
     target: &Path,
     tts: &dyn TtsEngine,
 ) -> Result<PreflightReport, AppError> {
+    run_with_presentation(workspace, target, tts, None).await
+}
+
+/// Run the existing target checks and, only when explicitly requested,
+/// validate the Marp source/tool needed by `generate --presentation`.
+pub async fn run_with_presentation(
+    workspace: &Workspace,
+    target: &Path,
+    tts: &dyn TtsEngine,
+    presentation_source: Option<&Path>,
+) -> Result<PreflightReport, AppError> {
     let is_project = target
         .file_name()
         .is_some_and(|name| name == "project.vfp.json")
         || target.extension().is_some_and(|extension| extension == "json");
-    if is_project {
+    let mut report = if is_project {
         project_preflight(workspace, target, tts).await
     } else {
         script_preflight(workspace, target, tts).await
+    }?;
+    if let Some(source) = presentation_source {
+        append_presentation_checks(workspace, target, source, is_project, &mut report.checks);
+        report.status = overall_status(&report.checks);
+    }
+    Ok(report)
+}
+
+fn append_presentation_checks(
+    workspace: &Workspace,
+    target: &Path,
+    source: &Path,
+    is_project: bool,
+    checks: &mut Vec<PreflightCheck>,
+) {
+    let mut slide_count = None;
+    match presentation::validate(workspace, source) {
+        Ok(report) => {
+            slide_count = Some(report.slide_count);
+            let is_valid = report.is_valid();
+            for diagnostic in report.diagnostics {
+                checks.push(check(
+                    &diagnostic.code,
+                    match diagnostic.level {
+                        DiagnosticLevel::Warning => PreflightStatus::Warning,
+                        DiagnosticLevel::Failure => PreflightStatus::Failure,
+                    },
+                    diagnostic.path,
+                    diagnostic.detail,
+                    Some(&diagnostic.remediation),
+                ));
+            }
+            if is_valid {
+                checks.push(check(
+                    "presentation_source",
+                    PreflightStatus::Pass,
+                    Some(workspace.relative(source)),
+                    format!("valid Marp Markdown with {} slide(s)", report.slide_count),
+                    None,
+                ));
+            }
+        }
+        Err(error) => checks.push(check(
+            "presentation_source",
+            PreflightStatus::Failure,
+            Some(workspace.relative(source)),
+            error.to_string(),
+            Some("restore the source and fix its Marp Markdown before generate"),
+        )),
+    }
+
+    match MarpCli::detect().availability() {
+        Ok(info) => checks.push(check(
+            "marp",
+            PreflightStatus::Pass,
+            Some(info.executable),
+            info.version,
+            None,
+        )),
+        Err(error) => checks.push(check(
+            "marp_unavailable",
+            PreflightStatus::Failure,
+            Some("VIDEOFORGE_MARP".into()),
+            error.to_string(),
+            Some("install the Marp CLI executable and a supported browser, or set VIDEOFORGE_MARP"),
+        )),
+    }
+
+    if !is_project {
+        if let Some(slides) = slide_count {
+            if let Ok(config) = workspace.load_config() {
+                let script = validate::validate_file(workspace, &config, target);
+                let narration_segments = script.dialogues.len();
+                checks.push(check(
+                    "presentation_mapping",
+                    if slides == narration_segments {
+                        PreflightStatus::Pass
+                    } else {
+                        PreflightStatus::Failure
+                    },
+                    Some(workspace.relative(source)),
+                    format!(
+                        "{slides} slide(s), {narration_segments} narration segment(s)"
+                    ),
+                    if slides == narration_segments {
+                        None
+                    } else {
+                        Some("make slide count exactly match script dialogue count; P0 never silently adjusts")
+                    },
+                ));
+            }
+        }
     }
 }
 

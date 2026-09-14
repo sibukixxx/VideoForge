@@ -32,6 +32,8 @@ cargo test -p videoforge-project -- --nocapture
 cargo run -p videoforge-cli -- doctor --fake-tts --json
 cargo run -p videoforge-cli -- generate scripts/sample.md --fake-tts --no-preview
 cargo run -p videoforge-cli -- character inspect fixtures/character/mock-character/manifest.yaml
+cargo run -p videoforge-cli -- presentation prompt scripts/sample.md
+cargo run -p videoforge-cli -- generate scripts/sample.md --presentation presentation.md
 
 # render presets (P1-6) and fast preview (P1-7)
 cargo run -p videoforge-cli -- generate scripts/sample.md --preset youtube-1080p
@@ -241,6 +243,9 @@ These span files and are easy to break silently:
 
 - **`project.vfp.json` is the single source of truth.** `.ymmp`, `captions.srt`, `preview.mp4`
   are derived. Never hand-edit generated output; change the script or the config and regenerate.
+- **Marp is only a source preprocessor.** It materializes PNGs that become existing
+  `Clip::Image` values. Never add a Marp-specific clip/track, a second presentation IR, or a
+  Marp branch in the FFmpeg renderer.
 - **`RelativeAssetPath`** (`videoforge-project/src/path.rs`) is the only asset path type in the IR:
   forward slashes, relative to the project dir, no `..`, no drive-letter `:` component. Absolute
   paths appear only at the moment of YMM4 materialization.

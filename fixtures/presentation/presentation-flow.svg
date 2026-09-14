@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="720" viewBox="0 0 720 720">
+  <rect width="720" height="720" rx="56" fill="#1d2a3d"/>
+  <g fill="#63d7c6" font-family="sans-serif" font-size="52" font-weight="700" text-anchor="middle">
+    <text x="360" y="155">SCRIPT</text>
+    <text x="360" y="365">SLIDE</text>
+    <text x="360" y="575">VIDEO</text>
+  </g>
+  <g stroke="#f7fafc" stroke-width="18" fill="none">
+    <path d="M360 190v105"/>
+    <path d="m315 260 45 45 45-45"/>
+    <path d="M360 400v105"/>
+    <path d="m315 470 45 45 45-45"/>
+  </g>
+</svg>

@@ -10,6 +10,9 @@ use videoforge_core::doctor::{self, CheckStatus, DoctorInput};
 use videoforge_core::export::{ExportRequest, ProjectExporter};
 use videoforge_core::preview::PreviewRenderer;
 use videoforge_core::preflight::{self, PreflightStatus};
+use videoforge_core::presentation::{
+    self, DiagnosticLevel, MarpCli, PresentationDiagnostic, PresentationRenderer,
+};
 use videoforge_core::progress::{FnProgress, GenerationStage};
 use videoforge_core::project::VideoProject;
 use videoforge_core::tts::{FakeTtsEngine, Speaker, TtsCache, TtsEngine};
@@ -148,6 +151,231 @@ pub fn draft(ctx: &Context, action: crate::DraftAction) -> anyhow::Result<ExitCo
     exit(if report.structurally_valid { 0 } else { 2 })
 }
 
+// ---------------------------------------------------------------- presentation
+
+pub fn presentation(
+    ctx: &Context,
+    action: crate::PresentationAction,
+) -> anyhow::Result<ExitCode> {
+    let input = match &action {
+        crate::PresentationAction::Prompt { script } => script,
+        crate::PresentationAction::Validate { presentation }
+        | crate::PresentationAction::Render { presentation } => presentation,
+    };
+    let ws = ctx.workspace_for(Some(input))?;
+    let source = resolve_workspace_file(&ws, input, "presentation input")?;
+
+    match action {
+        crate::PresentationAction::Prompt { .. } => {
+            // Reuse the normal parser first: a presentation prompt must never
+            // be emitted from a structurally invalid VideoForge script.
+            let config = ws.load_config()?;
+            core_validate::validate_file(&ws, &config, &source).into_result()?;
+            let prompt = presentation::prompt(&ws, &source)?;
+            if ctx.json {
+                ctx.emit_json(&serde_json::json!({"prompt": prompt}))?;
+            } else {
+                println!("{prompt}");
+            }
+            exit(0)
+        }
+        crate::PresentationAction::Validate { .. } => {
+            let mut report = presentation::validate(&ws, &source)?;
+            let marp = MarpCli::detect();
+            let marp_info = match marp.availability() {
+                Ok(info) => Some(info),
+                Err(error) => {
+                    report.diagnostics.push(PresentationDiagnostic {
+                        code: "marp_unavailable".into(),
+                        level: DiagnosticLevel::Failure,
+                        path: Some("VIDEOFORGE_MARP".into()),
+                        detail: error.to_string(),
+                        remediation:
+                            "install Marp CLI and a supported browser, or set VIDEOFORGE_MARP"
+                                .into(),
+                    });
+                    None
+                }
+            };
+            if ctx.json {
+                ctx.emit_json(&serde_json::json!({
+                    "ok": report.is_valid(),
+                    "validation": &report,
+                    "marp": &marp_info,
+                }))?;
+            } else {
+                println!("Presentation: {}", report.source);
+                println!("Slides: {}", report.slide_count);
+                if let Some(info) = marp_info {
+                    println!("Marp: {} ({})", info.version, info.executable);
+                }
+                for item in &report.diagnostics {
+                    println!(
+                        "{} {}{}: {}",
+                        if item.level == DiagnosticLevel::Failure {
+                            "✗"
+                        } else {
+                            "!"
+                        },
+                        item.code,
+                        item.path
+                            .as_deref()
+                            .map(|path| format!(" [{path}]"))
+                            .unwrap_or_default(),
+                        item.detail
+                    );
+                    println!("  fix: {}", item.remediation);
+                }
+            }
+            exit(if !report.is_valid() {
+                2
+            } else if report.has_warnings() {
+                3
+            } else {
+                0
+            })
+        }
+        crate::PresentationAction::Render { .. } => {
+            let report = presentation::validate(&ws, &source)?;
+            if !report.is_valid() {
+                if ctx.json {
+                    ctx.emit_json(&report)?;
+                } else {
+                    println!("Presentation: {}", report.source);
+                    for item in &report.diagnostics {
+                        println!(
+                            "{} {}{}: {}",
+                            if item.level == DiagnosticLevel::Failure {
+                                "✗"
+                            } else {
+                                "!"
+                            },
+                            item.code,
+                            item.path
+                                .as_deref()
+                                .map(|path| format!(" [{path}]"))
+                                .unwrap_or_default(),
+                            item.detail
+                        );
+                        println!("  fix: {}", item.remediation);
+                    }
+                }
+                return exit(2);
+            }
+            let slug = presentation_slug(&source);
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis())
+                .unwrap_or(0);
+            let tmp = ws
+                .tmp_dir()
+                .join(format!("presentation-{slug}-{}-{nonce}", std::process::id()));
+            let renderer = MarpCli::detect();
+            let rendered = match renderer.render(&source, &tmp) {
+                Ok(rendered) => rendered,
+                Err(error) => {
+                    let _ = std::fs::remove_dir_all(&tmp);
+                    return Err(error.into());
+                }
+            };
+            let output_dir = ws.generated_dir().join(&slug).join("presentation");
+            replace_directory(&tmp, &output_dir)?;
+            let slides: Vec<_> = rendered
+                .slides
+                .iter()
+                .filter_map(|path| path.file_name())
+                .map(|name| output_dir.join(name))
+                .collect();
+            if ctx.json {
+                ctx.emit_json(&serde_json::json!({
+                    "ok": true,
+                    "renderer": rendered.renderer,
+                    "output_dir": output_dir,
+                    "slides": slides,
+                }))?;
+            } else {
+                println!("Rendered {} slide(s) to {}", slides.len(), output_dir.display());
+            }
+            exit(0)
+        }
+    }
+}
+
+fn resolve_workspace_file(
+    ws: &Workspace,
+    input: &Path,
+    label: &str,
+) -> anyhow::Result<PathBuf> {
+    if input.is_file() {
+        let canonical = input
+            .canonicalize()
+            .map_err(|error| AppError::read(input, error))?;
+        if canonical.starts_with(ws.root()) {
+            return Ok(canonical);
+        }
+        return Err(AppError::InvalidWorkspacePath {
+            path: input.display().to_string(),
+            reason: "file is outside the workspace".into(),
+        }
+        .into());
+    }
+    if let Ok(path) = ws.resolve(&input.to_string_lossy()) {
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    Err(anyhow!("{label} not found: {}", input.display()))
+}
+
+fn presentation_slug(source: &Path) -> String {
+    let stem = source
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("presentation");
+    let slug: String = stem
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = slug
+        .trim_matches('-')
+        .chars()
+        .take(80)
+        .collect::<String>();
+    if slug.is_empty() {
+        "presentation".into()
+    } else {
+        slug
+    }
+}
+
+fn replace_directory(source: &Path, target: &Path) -> Result<(), AppError> {
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| AppError::write(parent, e))?;
+    }
+    if !target.exists() {
+        return std::fs::rename(source, target).map_err(|e| AppError::write(target, e));
+    }
+    let backup = target.with_extension(format!("old-{}", std::process::id()));
+    if backup.exists() {
+        return Err(AppError::UnsafeOverwrite {
+            path: backup,
+            reason: "stale presentation backup exists; inspect and remove it first".into(),
+        });
+    }
+    std::fs::rename(target, &backup).map_err(|e| AppError::write(target, e))?;
+    if let Err(error) = std::fs::rename(source, target) {
+        let _ = std::fs::rename(&backup, target);
+        return Err(AppError::write(target, error));
+    }
+    std::fs::remove_dir_all(&backup).map_err(|e| AppError::write(&backup, e))
+}
+
 // ---------------------------------------------------------------- init
 
 pub fn init(ctx: &Context, dir: Option<PathBuf>, name: Option<String>) -> anyhow::Result<ExitCode> {
@@ -247,6 +475,7 @@ pub async fn doctor(
 pub async fn preflight(
     ctx: &Context,
     target: PathBuf,
+    presentation: Option<PathBuf>,
     fake_tts: bool,
     endpoint: Option<String>,
 ) -> anyhow::Result<ExitCode> {
@@ -260,7 +489,13 @@ pub async fn preflight(
         cfg.tts.allow_remote_endpoint,
     )?;
     let target = resolve_preflight_target(&ws, &target)?;
-    let report = preflight::run(&ws, &target, tts.as_ref()).await?;
+    let presentation = presentation
+        .as_deref()
+        .map(|path| resolve_workspace_file(&ws, path, "presentation"))
+        .transpose()?;
+    let report =
+        preflight::run_with_presentation(&ws, &target, tts.as_ref(), presentation.as_deref())
+            .await?;
 
     if ctx.json {
         ctx.emit_json(&report)?;
@@ -436,6 +671,7 @@ pub struct GenerateArgs {
     pub preset: Option<String>,
     /// Fast preview range as `START:END` in milliseconds (P1-7), e.g. `0:15000`.
     pub range_ms: Option<String>,
+    pub presentation: Option<PathBuf>,
     pub fake_tts: bool,
     pub endpoint: Option<String>,
 }
@@ -558,7 +794,17 @@ pub async fn generate(ctx: &Context, args: GenerateArgs) -> anyhow::Result<ExitC
         render_preset,
         preview_range_ms,
     };
-    let out = core_generate::generate(&ws, &script, options, deps).await?;
+    let presentation = args
+        .presentation
+        .as_deref()
+        .map(|path| resolve_workspace_file(&ws, path, "presentation"))
+        .transpose()?;
+    let out = match presentation {
+        Some(path) => {
+            core_generate::generate_with_presentation(&ws, &script, &path, options, deps).await?
+        }
+        None => core_generate::generate(&ws, &script, options, deps).await?,
+    };
 
     if ctx.json {
         ctx.emit_json(&serde_json::json!({
