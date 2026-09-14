@@ -24,6 +24,7 @@ pub mod lipsync;
 pub mod manifest;
 pub mod preset;
 pub mod preflight;
+pub mod presentation;
 pub mod preview;
 pub mod progress;
 pub mod speaker_profile;
@@ -35,7 +36,9 @@ pub mod workspace;
 pub use capabilities::Capabilities;
 pub use config::Config;
 pub use error::AppError;
-pub use generate::{generate, GenerateDeps, GenerateOptions, GeneratedProject};
+pub use generate::{
+    generate, generate_with_presentation, GenerateDeps, GenerateOptions, GeneratedProject,
+};
 pub use progress::{GenerationStage, ProgressSink};
 pub use workspace::Workspace;
 

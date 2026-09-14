@@ -45,6 +45,7 @@ use videoforge_timeline::{
 use crate::config::Config;
 use crate::error::AppError;
 use crate::manifest::{Manifest, MANIFEST_SCHEMA_VERSION};
+use crate::presentation::{self, MarpCli, PresentationRenderer};
 use crate::preview::{PreviewRenderer, PreviewRequest};
 use crate::progress::{GenerationStage, NoopProgress, ProgressSink};
 use crate::tts::{bind_cache, synthesize_all, SynthesisJob, TtsCache, TtsEngine};
@@ -138,6 +139,49 @@ pub async fn generate(
     options: GenerateOptions,
     deps: GenerateDeps,
 ) -> Result<GeneratedProject, AppError> {
+    generate_internal(workspace, script_path, None, options, deps).await
+}
+
+/// Generate through the existing pipeline after materializing a Marp deck.
+/// The resulting canonical project contains only ordinary image clips.
+pub async fn generate_with_presentation(
+    workspace: &Workspace,
+    script_path: &Path,
+    presentation_path: &Path,
+    options: GenerateOptions,
+    deps: GenerateDeps,
+) -> Result<GeneratedProject, AppError> {
+    let validation = presentation::validate(workspace, presentation_path)?;
+    if !validation.is_valid() {
+        return Err(AppError::InvalidPresentation(
+            validation
+                .diagnostics
+                .iter()
+                .filter(|item| item.level == presentation::DiagnosticLevel::Failure)
+                .map(|item| format!("{}: {}", item.code, item.detail))
+                .collect::<Vec<_>>()
+                .join("; "),
+        ));
+    }
+    let renderer = MarpCli::detect();
+    renderer.availability()?;
+    generate_internal(
+        workspace,
+        script_path,
+        Some((presentation_path, &renderer)),
+        options,
+        deps,
+    )
+    .await
+}
+
+async fn generate_internal(
+    workspace: &Workspace,
+    script_path: &Path,
+    presentation_input: Option<(&Path, &dyn PresentationRenderer)>,
+    options: GenerateOptions,
+    deps: GenerateDeps,
+) -> Result<GeneratedProject, AppError> {
     let progress = Arc::clone(&deps.progress);
     let mut config = workspace.load_config()?;
     // Resolve any speaker linked to a character (design §5) to a numeric
@@ -174,6 +218,7 @@ pub async fn generate(
         &tmp_dir,
         &options,
         &deps,
+        presentation_input,
         &mut warnings,
     )
     .await;
@@ -214,10 +259,28 @@ async fn run_pipeline(
     tmp_dir: &Path,
     options: &GenerateOptions,
     deps: &GenerateDeps,
+    presentation_input: Option<(&Path, &dyn PresentationRenderer)>,
     warnings: &mut Vec<String>,
 ) -> Result<(VideoProject, Manifest, Option<PathBuf>), AppError> {
     let progress = &deps.progress;
     let cancel = &options.cancel;
+    let has_presentation = presentation_input.is_some();
+
+    // Marp is an external preprocessor only. Render before TTS so missing
+    // browser/theme/tool errors do not waste synthesis work.
+    let presentation_slides = match presentation_input {
+        Some((source, renderer)) => {
+            let rendered = renderer.render(source, &tmp_dir.join("presentation"))?;
+            if rendered.slides.len() != report.dialogues.len() {
+                return Err(AppError::PresentationSlideMismatch {
+                    slides: rendered.slides.len(),
+                    narration_segments: report.dialogues.len(),
+                });
+            }
+            Some(presentation::slide_asset_paths(rendered.slides.len())?)
+        }
+        None => None,
+    };
 
     // --- TTS -------------------------------------------------------------
     let jobs: Vec<SynthesisJob> = report
@@ -426,6 +489,9 @@ async fn run_pipeline(
         project.video.height = preset.height;
         project.video.fps = preset.fps;
     }
+    if let Some(slides) = presentation_slides {
+        presentation::attach_slides(&mut project, &slides)?;
+    }
     let encode = options.render_preset.map(|p| p.encode).unwrap_or_default();
 
     // --- Project IR + captions + source copy -----------------------------
@@ -488,7 +554,13 @@ async fn run_pipeline(
                     let previous_preview = previous_dir.join(PREVIEW_FILE);
                     let previous_fingerprint_path =
                         previous_dir.join(crate::buildcache::PREVIEW_FINGERPRINT_FILE);
-                    let cache_hit = !is_fast
+                    // Marp may regenerate different pixels at the same
+                    // slide-NNN.png paths. The existing cache fingerprint
+                    // hashes project JSON, not arbitrary asset bytes, so a
+                    // presentation run must render rather than replay a
+                    // stale preview. Presentation-less behavior is unchanged.
+                    let cache_hit = !has_presentation
+                        && !is_fast
                         && previous_preview.is_file()
                         && std::fs::read_to_string(&previous_fingerprint_path)
                             .map(|s| s == fingerprint)
@@ -667,6 +739,45 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
+    struct FakePresentationRenderer {
+        slides: usize,
+    }
+
+    impl PresentationRenderer for FakePresentationRenderer {
+        fn id(&self) -> &'static str {
+            "fake-presentation"
+        }
+
+        fn availability(&self) -> Result<crate::presentation::MarpInfo, AppError> {
+            Ok(crate::presentation::MarpInfo {
+                executable: "fake".into(),
+                version: "fake 1".into(),
+            })
+        }
+
+        fn render(
+            &self,
+            source: &Path,
+            output_dir: &Path,
+        ) -> Result<crate::presentation::RenderedPresentation, AppError> {
+            std::fs::create_dir_all(output_dir).map_err(|e| AppError::write(output_dir, e))?;
+            std::fs::copy(source, output_dir.join(crate::presentation::SOURCE_FILE))
+                .map_err(|e| AppError::write(output_dir, e))?;
+            let mut slides = Vec::new();
+            for index in 1..=self.slides {
+                let path = output_dir.join(format!("slide-{index:03}.png"));
+                std::fs::write(&path, b"synthetic png")
+                    .map_err(|e| AppError::write(&path, e))?;
+                slides.push(path);
+            }
+            Ok(crate::presentation::RenderedPresentation {
+                output_dir: output_dir.to_path_buf(),
+                slides,
+                renderer: self.id().into(),
+            })
+        }
+    }
+
     #[async_trait::async_trait]
     impl PreviewRenderer for CountingPreviewRenderer {
         fn id(&self) -> &'static str {
@@ -804,6 +915,97 @@ mod tests {
             Vec::<String>::new(),
             "the displaced output must be removed once the new one is in place"
         );
+    }
+
+    #[tokio::test]
+    async fn fake_tts_presentation_e2e_materializes_existing_image_clips() {
+        let dir = tempfile::tempdir().unwrap();
+        init::init(dir.path(), Some("t")).unwrap();
+        let fixture = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/character/mock-png-character"
+        ));
+        let sprites = dir.path().join("characters/sprites");
+        std::fs::create_dir_all(&sprites).unwrap();
+        std::fs::copy(
+            fixture.join("manifest.yaml"),
+            dir.path().join("characters/manifest.yaml"),
+        )
+        .unwrap();
+        for name in ["closed.png", "half.png", "open.png"] {
+            std::fs::copy(fixture.join("sprites").join(name), sprites.join(name)).unwrap();
+        }
+        std::fs::write(
+            dir.path().join("videoforge.yaml"),
+            "character_manifest: characters/manifest.yaml\nspeakers:\n  mock_a:\n    character_id: mock_a\n  mock_b:\n    character_id: mock_b\n",
+        )
+        .unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let script = ws.scripts_dir().join("sample.md");
+        std::fs::write(
+            &script,
+            "---\ntitle: Presentation E2E\n---\n\nmock_a:\n一枚目です。\n\nmock_b:\n二枚目です。\n\nmock_a:\n三枚目です。\n",
+        )
+        .unwrap();
+        let presentation_source = ws.root().join("presentation.md");
+        std::fs::write(&presentation_source, "synthetic presentation").unwrap();
+        let renderer = FakePresentationRenderer { slides: 3 };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut deps = GenerateDeps::new(Arc::new(FakeTtsEngine::default()));
+        deps.preview = Some(Arc::new(CountingPreviewRenderer {
+            calls: Arc::clone(&calls),
+        }));
+
+        let out = generate_internal(
+            &ws,
+            &script,
+            Some((&presentation_source, &renderer)),
+            GenerateOptions::default(),
+            deps,
+        )
+        .await
+        .unwrap();
+
+        let project = VideoProject::load(&out.project_path).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(out.output_dir.join(PREVIEW_FILE).is_file());
+        assert!(out.output_dir.join(CAPTIONS_FILE).is_file());
+        assert_eq!(project.character_performance_clips().len(), 3);
+        let presentation = project
+            .tracks
+            .iter()
+            .find(|track| track.id == "presentation")
+            .unwrap();
+        assert_eq!(presentation.kind, videoforge_project::TrackKind::Image);
+        assert_eq!(presentation.clips.len(), project.audio_clips().len());
+        for index in 1..=3 {
+            assert!(out
+                .output_dir
+                .join(format!("presentation/slide-{index:03}.png"))
+                .is_file());
+        }
+    }
+
+    #[tokio::test]
+    async fn generate_without_presentation_keeps_the_original_project_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        init::init(dir.path(), Some("t")).unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let script = ws.scripts_dir().join("sample.md");
+        let out = generate(
+            &ws,
+            &script,
+            GenerateOptions::default(),
+            GenerateDeps::new(Arc::new(FakeTtsEngine::default())),
+        )
+        .await
+        .unwrap();
+        assert!(!out
+            .project
+            .tracks
+            .iter()
+            .any(|track| track.id == "presentation"));
+        assert!(!out.output_dir.join("presentation").exists());
     }
 
     #[tokio::test]

@@ -1,0 +1,40 @@
+/* @theme videoforge */
+@import 'default';
+
+:root {
+  --vf-bg: #101827;
+  --vf-panel: #1d2a3d;
+  --vf-text: #f7fafc;
+  --vf-muted: #cbd5e1;
+  --vf-accent: #63d7c6;
+}
+
+section {
+  background: var(--vf-bg);
+  color: var(--vf-text);
+  font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", sans-serif;
+  font-size: 48px;
+  line-height: 1.35;
+  padding: 72px 400px 250px 96px;
+}
+
+section.character-left { padding: 72px 96px 250px 400px; }
+section.characters-both { padding: 72px 330px 250px; }
+section.no-character { padding: 72px 96px 250px; }
+section.title { justify-content: center; }
+section.big-stat { justify-content: center; text-align: center; }
+
+h1 { color: var(--vf-text); font-size: 78px; line-height: 1.18; margin-bottom: 30px; }
+h2 { color: var(--vf-accent); font-size: 60px; }
+strong { color: var(--vf-accent); }
+li { margin: 0.3em 0; }
+
+table { width: 100%; font-size: 36px; }
+th { background: var(--vf-accent); color: #08131f; }
+td { background: var(--vf-panel); }
+
+section.big-stat h1 { color: var(--vf-accent); font-size: 150px; line-height: 1; }
+section.big-stat p { color: var(--vf-muted); font-size: 40px; }
+.muted { color: var(--vf-muted); }
+
+footer, section::after { bottom: 225px; color: var(--vf-muted); }

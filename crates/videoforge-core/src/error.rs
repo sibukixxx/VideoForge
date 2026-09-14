@@ -72,6 +72,18 @@ pub enum AppError {
     #[error("preview render failed: {0}")]
     PreviewRenderFailed(String),
 
+    #[error("Marp is unavailable: {0}")]
+    MarpUnavailable(String),
+    #[error("invalid presentation: {0}")]
+    InvalidPresentation(String),
+    #[error("presentation render failed: {0}")]
+    PresentationRenderFailed(String),
+    #[error("presentation has {slides} slide(s), but the script has {narration_segments} narration segment(s); P0 requires an exact 1:1 mapping")]
+    PresentationSlideMismatch {
+        slides: usize,
+        narration_segments: usize,
+    },
+
     #[error("invalid template {path}: {reason}")]
     InvalidTemplate { path: PathBuf, reason: String },
     #[error("template prototype missing: {0}")]
@@ -165,6 +177,10 @@ impl AppError {
             AppError::PngSpriteInvalid { .. } => "png_sprite_invalid",
             AppError::FfmpegUnavailable(_) => "ffmpeg_unavailable",
             AppError::PreviewRenderFailed(_) => "preview_render_failed",
+            AppError::MarpUnavailable(_) => "marp_unavailable",
+            AppError::InvalidPresentation(_) => "invalid_presentation",
+            AppError::PresentationRenderFailed(_) => "presentation_render_failed",
+            AppError::PresentationSlideMismatch { .. } => "presentation_slide_mismatch",
             AppError::InvalidTemplate { .. } => "invalid_template",
             AppError::TemplatePrototypeMissing(_) => "template_prototype_missing",
             AppError::TemplatePrototypeAmbiguous { .. } => "template_prototype_ambiguous",
