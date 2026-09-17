@@ -82,18 +82,16 @@ impl AdminArtifactManifest {
             ("source_reference", self.source_reference.as_str()),
         ];
         if let Some((field, _)) = required.iter().find(|(_, value)| value.trim().is_empty()) {
-            return Err(AppError::validation(format!("{field} is required")));
+            return Err(AppError::Other(format!("{field} is required")));
         }
         if self.schema_version != ADMIN_ARTIFACT_SCHEMA_VERSION {
-            return Err(AppError::validation("unsupported Admin artifact schema"));
+            return Err(AppError::Other("unsupported Admin artifact schema".into()));
         }
         if self.source_system != "videoforge" || self.artifact_type != "video/mp4" {
-            return Err(AppError::validation("invalid Admin artifact identity"));
+            return Err(AppError::Other("invalid Admin artifact identity".into()));
         }
         if self.metadata.duration_ms == 0 || self.metadata.width == 0 || self.metadata.height == 0 {
-            return Err(AppError::validation(
-                "duration_ms, width, and height must be greater than zero",
-            ));
+            return Err(AppError::Other("duration_ms, width, and height must be greater than zero".into()));
         }
         Ok(())
     }
