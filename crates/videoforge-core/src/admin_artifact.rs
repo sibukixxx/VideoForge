@@ -91,7 +91,9 @@ impl AdminArtifactManifest {
             return Err(AppError::Other("invalid Admin artifact identity".into()));
         }
         if self.metadata.duration_ms == 0 || self.metadata.width == 0 || self.metadata.height == 0 {
-            return Err(AppError::Other("duration_ms, width, and height must be greater than zero".into()));
+            return Err(AppError::Other(
+                "duration_ms, width, and height must be greater than zero".into(),
+            ));
         }
         Ok(())
     }
