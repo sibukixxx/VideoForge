@@ -47,10 +47,7 @@ impl AdminArtifactManifest {
             schema_version: ADMIN_ARTIFACT_SCHEMA_VERSION.to_owned(),
             source_system: "videoforge".to_owned(),
             external_id: slug.to_owned(),
-            idempotency_key: format!(
-                "videoforge:{slug}:{}:{artifact_path}",
-                manifest.generated_at
-            ),
+            idempotency_key: format!("videoforge:{slug}:{artifact_path}:admin-artifact:v1"),
             artifact_type: "video/mp4".to_owned(),
             path: artifact_path.to_owned(),
             title: title.to_owned(),
