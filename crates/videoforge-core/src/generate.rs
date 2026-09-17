@@ -65,6 +65,7 @@ pub const PREVIEW_FILE: &str = "preview.mp4";
 pub const PREVIEW_FAST_FILE: &str = "preview.fast.mp4";
 pub const SOURCE_FILE: &str = "source.md";
 pub const ASSET_REGISTRY_FILE: &str = "asset-registry.json";
+pub use crate::admin_artifact::ADMIN_ARTIFACT_FILE;
 
 #[derive(Clone)]
 pub struct GenerateOptions {
@@ -559,6 +560,17 @@ async fn run_pipeline(
         warnings: warnings.clone(),
     };
     manifest.save(&tmp_dir.join(MANIFEST_FILE))?;
+    if let Some(artifact_path) = manifest.preview.as_deref() {
+        let admin_artifact = crate::admin_artifact::AdminArtifactManifest::from_render(
+            &report.slug,
+            &report.title,
+            artifact_path,
+            project.video.width,
+            project.video.height,
+            &manifest,
+        )?;
+        admin_artifact.save(&tmp_dir.join(ADMIN_ARTIFACT_FILE))?;
+    }
 
     // --- Asset registry (P0-2) --------------------------------------------
     let character_manifest_ref = character_manifest.as_ref().map(|loaded| {
