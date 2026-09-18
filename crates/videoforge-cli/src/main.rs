@@ -37,6 +37,11 @@ enum Command {
         #[command(subcommand)]
         action: DraftAction,
     },
+    /// Create, validate, or render a Marp Markdown presentation
+    Presentation {
+        #[command(subcommand)]
+        action: PresentationAction,
+    },
     /// Create a new workspace (videoforge.yaml, AGENTS.md, scripts/, assets/, templates/, generated/)
     Init {
         /// Directory to create (default: current directory)
@@ -51,6 +56,9 @@ enum Command {
     Preflight {
         /// Script Markdown or canonical project.vfp.json
         target: PathBuf,
+        /// Marp Markdown to validate for this script generation
+        #[arg(long)]
+        presentation: Option<PathBuf>,
         #[command(flatten)]
         tts: TtsArgs,
     },
@@ -84,6 +92,9 @@ enum Command {
         /// of preview.mp4 and skips the incremental-build cache.
         #[arg(long, value_name = "START:END")]
         range_ms: Option<String>,
+        /// Marp Markdown to render into timed Image clips
+        #[arg(long)]
+        presentation: Option<PathBuf>,
         #[command(flatten)]
         tts: TtsArgs,
     },
@@ -174,6 +185,16 @@ enum DraftAction {
 }
 
 #[derive(Subcommand, Debug)]
+enum PresentationAction {
+    /// Print a deterministic prompt for an external AI; no API is called
+    Prompt { script: PathBuf },
+    /// Validate Marp Markdown, local assets, and Marp CLI availability
+    Validate { presentation: PathBuf },
+    /// Render Marp Markdown into generated/<slug>/presentation/slide-NNN.png
+    Render { presentation: PathBuf },
+}
+
+#[derive(Subcommand, Debug)]
 enum ExportTarget {
     /// Materialize a YukkuriMovieMaker4 project (.ymmp). Windows only.
     Ymm4 {
@@ -247,10 +268,22 @@ async fn main() -> ExitCode {
     };
     let result = match cli.command {
         Command::Draft { action } => commands::draft(&ctx, action),
+        Command::Presentation { action } => commands::presentation(&ctx, action),
         Command::Init { dir, name } => commands::init(&ctx, dir, name),
         Command::Doctor(tts) => commands::doctor(&ctx, tts.fake_tts, tts.endpoint).await,
-        Command::Preflight { target, tts } => {
-            commands::preflight(&ctx, target, tts.fake_tts, tts.endpoint).await
+        Command::Preflight {
+            target,
+            presentation,
+            tts,
+        } => {
+            commands::preflight(
+                &ctx,
+                target,
+                presentation,
+                tts.fake_tts,
+                tts.endpoint,
+            )
+            .await
         }
         Command::Validate { script } => commands::validate(&ctx, script),
         Command::Generate {
@@ -261,6 +294,7 @@ async fn main() -> ExitCode {
             keep_tmp,
             preset,
             range_ms,
+            presentation,
             tts,
         } => {
             commands::generate(
@@ -273,6 +307,7 @@ async fn main() -> ExitCode {
                     keep_tmp,
                     preset,
                     range_ms,
+                    presentation,
                     fake_tts: tts.fake_tts,
                     endpoint: tts.endpoint,
                 },

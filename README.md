@@ -42,6 +42,7 @@ MVP v0.1 の **Core + CLI**（設計書 Phase 1〜6）と Tauri GUI MVP（Phase 
 | Character（VOICEVOX + Live2D / 3-state PNG）: 話者を character manifest にリンクし、名前ベースで VOICEVOX voice を解決、決定論的な lip-sync データを `character_performance` track として timeline に保持。`model.type: png_lipsync` は closed/half/open の透過 PNG を実際に `preview.mp4` へ合成する（P0-1）。`videoforge character inspect` / `validate` | ✅ Live2D は音声+lip-syncデータまで（フレーム描画は未実装）。PNG は合成まで実装済み — 詳細は `docs/character-system.md` |
 | Asset Registry（P0-2）: 生成物が依存するファイルを識別・存在確認・SHA256 ハッシュ化し `generated/<slug>/asset-registry.json` に保存。`videoforge assets <project.vfp.json>` | ✅ 最小実装（巨大な DAM は作らない） |
 | Doctor（P0-3）: VOICEVOX / FFmpeg / 出力ディレクトリ書き込み可否 / 空きディスク容量 / 出力設定 / character identity→voice→asset 解決を生成前に確認 | ✅ |
+| Marp presentation（#59 P0）: 外部Marp CLIでMarkdownをPNG化し、既存Image clipとして音声区間へ1:1配置 | 🧪 #59。実Marp/FFmpeg dogfood手順は `docs/testing/marp-presentation-e2e.md` |
 
 ## Quick start
 
@@ -58,6 +59,21 @@ videoforge speakers                     # speaker_id (VOICEVOX style id) を確�
 videoforge validate scripts/sample.md
 videoforge generate scripts/sample.md   # → generated/sample/
 ```
+
+Marp資料を付ける場合（Marp CLIと対応ブラウザは利用者が事前に
+インストールする。VideoForgeは`npx`や自動downloadを実行しない）:
+
+```bash
+videoforge presentation prompt scripts/sample.md
+videoforge presentation validate presentation.md
+videoforge preflight scripts/sample.md --presentation presentation.md
+videoforge generate scripts/sample.md --presentation presentation.md
+```
+
+詳細とFake TTS dogfoodは
+[`docs/testing/marp-presentation-e2e.md`](docs/testing/marp-presentation-e2e.md)。
+MarpはPNG生成までで、動画のcanonical IRは従来どおり
+`generated/<slug>/project.vfp.json`だけです。
 
 `doctor` はFFmpegの存在だけでなく、preview生成で使うfilterと既定encoderも確認する。
 例えばlibfreetypeなしで `drawtext` を持たないFFmpegは、TTS開始前に警告される。
