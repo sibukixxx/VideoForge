@@ -20,6 +20,40 @@ Claude Code / Codex / 人間
                                         macOS:   bundle ymm4 ──▶ <slug>-ymm4-bundle.zip → Windows で export
 ```
 
+
+<!-- role-boundary:v1 -->
+## Role and boundaries
+
+**Role:** reviewed script and media inputsをdeterministicなVideoProject・audio・subtitle・preview・handoff artifactへ変換する **local media production compiler**。
+
+### Owns
+
+- script parsing and canonical VideoProject IR
+- TTS / subtitle / timeline / rendering pipeline
+- asset validation and deterministic production artifacts
+- preview / YMM4 export / production handoff
+
+### Does not own
+
+- editorial strategy or topic selection
+- generic research/evidence reasoning
+- affiliate/media performance decisions
+- social publishing credentials or channel automation
+- company/workflow system of record
+
+### Integration
+
+```text
+reviewed production brief / script
+        ↓
+     VideoForge
+        ↓
+VideoProject / preview / handoff artifact
+        ↓
+publisher / editor / downstream channel
+```
+
+VideoForge should remain usable as an independent production tool. Upstream systems decide **what to make**; VideoForge deterministically compiles **how the approved project becomes media artifacts**.
 ## Status
 
 MVP v0.1 の **Core + CLI**（設計書 Phase 1〜6）と Tauri GUI MVP（Phase 7, `apps/desktop`）を実装済み。GUI の実機確認（Windows / macOS）は未実施。
